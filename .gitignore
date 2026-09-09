@@ -1,0 +1,63 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- ML artifacts ---
+*.pth
+*.pt
+*.onnx
+*.engine
+*.trt
+*.ckpt
+*.h5
+checkpoints/
+runs/
+wandb/
+lightning_logs/
+outputs/
+logs/
+*.log
+
+# --- Data ---
+data/
+!data/.gitkeep
+*.zip
+*.tar
+*.tar.gz
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- Env / secrets ---
+.env
+*.env.local
+
+# --- Misc ---
+*.png
+*.jpg
+*.jpeg
+!docs/**/*.png
+!docs/**/*.jpg
