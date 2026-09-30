@@ -61,7 +61,7 @@ class FrozenBatchNorm2d(nn.Module):
         return x * scale + shift
 
     def extra_repr(self) -> str:
-        return f"{self.__class__.__name__}({self.num_features}, eps={self.eps})"
+        return f"{self.num_features}, eps={self.eps}"
 
 class ConvNormLayer(nn.Module):
     def __init__(
@@ -74,8 +74,55 @@ class ConvNormLayer(nn.Module):
         act: str | nn.Module | None = None,
     ) -> None:
         super().__init__()
-        # TODO: self.conv, self.norm, self.act
+        if padding is None:
+            padding = (kernel_size - 1) // 2
+        self.conv = nn.Conv2d(
+            in_channels=ch_in,
+            out_channels=ch_out,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=False
+        )
         
+        self.norm = nn.BatchNorm2d(ch_out)
+        self.act = get_activation(act)
 
     def forward(self, x: Tensor) -> Tensor:
-        ...
+        x = self.conv(x)
+        x = self.norm(x)
+        return self.act(x)
+
+def freeze_batch_norm2d(module: nn.Module) -> nn.Module:
+    """Recursively replace every nn.BatchNorm2d with FrozenBatchNorm2d.
+
+    Copies weight/bias/running stats/eps so it works before or after
+    loading pretrained weights. Returns the (possibly new) module:
+        model = freeze_batch_norm2d(model)
+    """
+    
+    # Check if module is standard BatchNorm
+    if isinstance(module, nn.BatchNorm2d):
+        frozen_bn = FrozenBatchNorm2d(module.num_features, eps=module.eps)
+        
+        ref = module.running_mean if module.running_mean is not None else module.weight
+        if ref is not None:
+            frozen_bn = frozen_bn.to(device=ref.device, dtype=ref.dtype)
+        
+        with torch.no_grad():
+            if module.weight is not None:
+                frozen_bn.weight.copy_(module.weight)
+                frozen_bn.bias.copy_(module.bias)
+            if module.running_mean is not None:
+                frozen_bn.running_mean.copy_(module.running_mean)
+                frozen_bn.running_var.copy_(module.running_var)
+            
+        return frozen_bn
+        
+    # Check with children and update recursively
+    for name, child in module.named_children():
+        new_child = freeze_batch_norm2d(child)
+        if new_child is not child:
+            setattr(module, name, new_child)
+            
+    return module
