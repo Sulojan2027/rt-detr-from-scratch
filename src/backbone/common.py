@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
+from torch import Tensor
 
-_ACTIVATIONS: dict[str, nn.Module] = {
+_ACTIVATIONS: dict[str, type[nn.Module]] = {
     "relu": nn.ReLU,
     "gelu": nn.GELU,
     "silu": nn.SiLU,
@@ -10,36 +11,71 @@ _ACTIVATIONS: dict[str, nn.Module] = {
 
 def get_activation(activation: str| None | nn.Module) -> nn.Module:
     if activation is None:
-        return None
+        return nn.Identity()
     if isinstance(activation, nn.Module):
         return activation
     if isinstance(activation, str):
-        activation = activation.lower()
-        if activation not in _ACTIVATIONS:
+        act = activation.lower()
+        if act not in _ACTIVATIONS:
             raise ValueError(
                 f"Unknown activation '{activation}'. Valid options: {sorted(_ACTIVATIONS)}"
             )
-        return _ACTIVATIONS[activation]()
-    raise TypeError(f"activation must be str, nn.Module or None, got {type(act).__name__}")
+        return _ACTIVATIONS[act]()
+    raise TypeError(f"activation must be str, nn.Module or None, got {type(activation).__name__}")
     
 class FrozenBatchNorm2d(nn.Module):
     def __init__(self, num_features: int, eps: float = 1e-5) -> None:
         super().__init__()
-        # TODO: 4 buffers + store num_features, eps
-        self.register_buffer("weight", torch.ones(num_features, num_features))
-        self.register_buffer("bias", torch.zeros(num_features, 1))
-        self.register_buffer("running_mean", torch.zeros(num_features, 1))
-        self.register_buffer("running_variance", torch.ones(num_features, 1))
+        self.register_buffer("weight", torch.ones(num_features))
+        self.register_buffer("bias", torch.zeros(num_features))
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
         self.num_features = num_features
         self.eps = eps
 
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        # TODO: drop prefix + "num_batches_tracked" if present, then call super
+    def _load_from_state_dict(
+        self,
+        state_dict: dict,
+        prefix: str, 
+        *args, 
+        **kwargs
+    ) -> None:
+        num_batches_tracked_key = prefix + "num_batches_tracked"
+        if num_batches_tracked_key in state_dict:
+            del state_dict[num_batches_tracked_key]
+            
+        super()._load_from_state_dict(
+            state_dict, prefix, *args, **kwargs
+        )
         
 
     def forward(self, x: Tensor) -> Tensor:
-        # TODO: compute scale & shift, reshape to [1, C, 1, 1], return x * scale + shift
+        weight = self.weight.reshape(1, -1, 1, 1)
+        bias = self.bias.reshape(1, -1, 1, 1)
+        rv = self.running_var.reshape(1, -1, 1, 1)
+        rm = self.running_mean.reshape(1, -1, 1, 1)
         
+        scale = weight * (rv + self.eps).rsqrt()
+        shift = bias - rm * scale
+        
+        return x * scale + shift
 
     def extra_repr(self) -> str:
+        return f"{self.__class__.__name__}({self.num_features}, eps={self.eps})"
+
+class ConvNormLayer(nn.Module):
+    def __init__(
+        self,
+        ch_in: int,
+        ch_out: int,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int | None = None,
+        act: str | nn.Module | None = None,
+    ) -> None:
+        super().__init__()
+        # TODO: self.conv, self.norm, self.act
+        
+
+    def forward(self, x: Tensor) -> Tensor:
         ...
