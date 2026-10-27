@@ -93,6 +93,39 @@ class ConvNormLayer(nn.Module):
         x = self.norm(x)
         return self.act(x)
 
+class ConvLayer(nn.Module):
+    """Backbone Conv -> BN -> act (HF: RTDetrResNetConvLayer).
+
+    Same as ConvNormLayer, but with HF's backbone attribute names
+    (convolution / normalization / activation) so HF weights load directly.
+    The encoder keeps ConvNormLayer (conv / norm / act), matching HF there.
+    """
+
+    def __init__(
+        self,
+        ch_in: int,
+        ch_out: int,
+        kernel_size: int,
+        stride: int = 1,
+        act: str | nn.Module | None = None,
+    ) -> None:
+        super().__init__()
+        self.convolution = nn.Conv2d(
+            in_channels=ch_in,
+            out_channels=ch_out,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=(kernel_size - 1) // 2,
+            bias=False
+        )
+        self.normalization = nn.BatchNorm2d(ch_out)
+        self.activation = get_activation(act)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.convolution(x)
+        x = self.normalization(x)
+        return self.activation(x)
+
 def freeze_batch_norm2d(module: nn.Module) -> nn.Module:
     """Recursively replace every nn.BatchNorm2d with FrozenBatchNorm2d.
 

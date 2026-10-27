@@ -3,22 +3,30 @@ from collections import OrderedDict
 import torch.nn as nn
 from torch import Tensor
 
-from .common import ConvNormLayer, get_activation, freeze_batch_norm2d
+from .common import ConvLayer, freeze_batch_norm2d, get_activation
 
 _VARIANTS = ("b", "d")
+
+class ShortCut(nn.Module):
+    """1x1 Conv -> BN projection, no activation (HF: RTDetrResNetShortCut)."""
+
+    def __init__(self, ch_in: int, ch_out: int, stride: int = 1) -> None:
+        super().__init__()
+        self.convolution = nn.Conv2d(ch_in, ch_out, kernel_size=1, stride=stride, bias=False)
+        self.normalization = nn.BatchNorm2d(ch_out)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.normalization(self.convolution(x))
 
 def _make_shortcut(ch_in: int, ch_out: int, stride: int, variant: str) -> nn.Module:
     """Projection shortcut. ch_out here = the block's TRUE output channels."""
     if variant == "d" and stride == 2:
+        # Unnamed Sequential like HF → keys "shortcut.1.convolution.weight"
         return nn.Sequential(
-            OrderedDict(
-                    [
-                        ("pool", nn.AvgPool2d(kernel_size=2, stride=2, padding=0, ceil_mode=True)),
-                        ("conv", ConvNormLayer(ch_in, ch_out, 1, 1))
-                    ]
-                )
+            nn.AvgPool2d(kernel_size=2, stride=2, padding=0, ceil_mode=True),
+            ShortCut(ch_in, ch_out, stride=1),
         )
-    return ConvNormLayer(ch_in, ch_out, 1, stride)
+    return ShortCut(ch_in, ch_out, stride)
 
 def _validate_args(ch_in: int, ch_out: int, stride: int, shortcut: bool, variant: str) -> None:
     if variant not in _VARIANTS:
@@ -51,31 +59,15 @@ class BasicBlock(nn.Module):
         # Validate arguments
         _validate_args(ch_in, ch_out, stride, shortcut, variant)
         
-        self.shortcut = shortcut
-        if not shortcut:
-            self.short = _make_shortcut(ch_in, ch_out, stride, variant)
-        
-        self.branch2a = ConvNormLayer(
-            ch_in=ch_in,
-            ch_out=ch_out,
-            kernel_size=3,
-            stride=stride,
-            act=act
+        self.shortcut = nn.Identity() if shortcut else _make_shortcut(ch_in, ch_out, stride, variant)
+        self.layer = nn.Sequential(
+            ConvLayer(ch_in, ch_out, 3, stride=stride, act=act),
+            ConvLayer(ch_out, ch_out, 3, stride=1, act=None),
         )
-        
-        self.branch2b = ConvNormLayer(
-            ch_in=ch_out,
-            ch_out=ch_out,
-            kernel_size=3,
-            stride=1,
-            act=None
-        )
-        self.act = get_activation(act)
-        
+        self.activation = get_activation(act)
+
     def forward(self, x: Tensor) -> Tensor:
-        out = self.branch2b(self.branch2a(x))
-        short = x if self.shortcut else self.short(x)
-        return self.act(out + short)
+        return self.activation(self.layer(x) + self.shortcut(x))
 
 class BottleNeck(nn.Module):
     expansion = 4  # block output channels = ch_out * expansion
@@ -94,21 +86,22 @@ class BottleNeck(nn.Module):
         width = ch_out
         out = ch_out * self.expansion
         _validate_args(ch_in, ch_out*self.expansion, stride, shortcut, variant)
-        self.branch2a = ConvNormLayer(ch_in, width, 1, stride=1, act=act)
-        self.branch2b = ConvNormLayer(width, width, 3, stride, act=act)
-        self.branch2c = ConvNormLayer(width, out, 1, 1, act=None)
-        self.shortcut = shortcut
-        if not self.shortcut:
-            self.short = _make_shortcut(ch_in, ch_out=out, stride=stride, variant=variant)
-        self.act = get_activation(act)
+        self.shortcut = (
+            nn.Identity() if shortcut
+            else _make_shortcut(ch_in, ch_out=out, stride=stride, variant=variant)
+        )
+        self.layer = nn.Sequential(
+            ConvLayer(ch_in, width, 1, stride=1, act=act),
+            ConvLayer(width, width, 3, stride, act=act),  # stride lives on the 3x3
+            ConvLayer(width, out, 1, 1, act=None),
+        )
+        self.activation = get_activation(act)
 
     def forward(self, x: Tensor) -> Tensor:
-        out_ = self.branch2c(self.branch2b(self.branch2a(x)))
-        short = x if self.shortcut else self.short(x)
-        return self.act(out_ + short)
+        return self.activation(self.layer(x) + self.shortcut(x))
 
 class Blocks(nn.Module):
-    """One ResNet stage: `count` blocks; only the first may downsample / project."""
+    """One ResNet stage (HF: RTDetrResNetStage): `count` blocks; only the first may downsample / project."""
 
     def __init__(
         self,
@@ -132,11 +125,11 @@ class Blocks(nn.Module):
         blocks_list.extend(
             block(ch_in, ch_out, stride=1, shortcut=True, act=act, variant=variant) for _ in range(count - 1)
         )
-        self.blocks = nn.Sequential(*blocks_list)
+        self.layers = nn.Sequential(*blocks_list)
         self.out_channels = ch_out * block.expansion
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.blocks(x)
+        return self.layers(x)
 
 # depth → number of blocks in each of the 4 stages
 _DEPTH_CFG: dict[int, list[int]] = {
@@ -186,27 +179,28 @@ class PResNet(nn.Module):
 
         block = BottleNeck if depth >= _BOTTLENECK_MIN_DEPTH else BasicBlock
 
-        # ---- Stem ----
-        # (name, ch_in, ch_out, kernel, stride)
+        # ---- Stem (HF: embedder.embedder + embedder.pooler) ----
+        # (ch_in, ch_out, kernel, stride)
         if variant == "d":
             # ResNet-D: three 3x3 convs instead of one 7x7 (same view, more non-linearity)
             stem_def = [
-                ("conv1_1", 3, _STEM_CH // 2, 3, 2),
-                ("conv1_2", _STEM_CH // 2, _STEM_CH // 2, 3, 1),
-                ("conv1_3", _STEM_CH // 2, _STEM_CH, 3, 1),
+                (3, _STEM_CH // 2, 3, 2),
+                (_STEM_CH // 2, _STEM_CH // 2, 3, 1),
+                (_STEM_CH // 2, _STEM_CH, 3, 1),
             ]
         else:
-            stem_def = [("conv1_1", 3, _STEM_CH, 7, 2)]
-        self.conv1 = nn.Sequential(
+            stem_def = [(3, _STEM_CH, 7, 2)]
+        self.embedder = nn.Sequential(
             OrderedDict(
-                (name, ConvNormLayer(c_in, c_out, k, stride=s, act=act))
-                for name, c_in, c_out, k, s in stem_def
+                embedder=nn.Sequential(
+                    *(ConvLayer(c_in, c_out, k, stride=s, act=act) for c_in, c_out, k, s in stem_def)
+                ),
+                pooler=nn.MaxPool2d(kernel_size=3, stride=2, padding=1),  # stride 2 → 4
             )
         )
-        self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)  # stride 2 → 4
 
-        # ---- Stages ----
-        self.res_layers = nn.ModuleList()
+        # ---- Stages (HF: encoder.stages) ----
+        self.encoder = nn.ModuleDict({"stages": nn.ModuleList()})
         all_channels = []
         ch_in = _STEM_CH
         for i, (width, count) in enumerate(zip(_STAGE_WIDTHS, _DEPTH_CFG[depth], strict=True)):
@@ -219,7 +213,7 @@ class PResNet(nn.Module):
                 act=act,
                 variant=variant,
             )
-            self.res_layers.append(stage)
+            self.encoder["stages"].append(stage)
             ch_in = stage.out_channels
             all_channels.append(stage.out_channels)
 
@@ -230,9 +224,9 @@ class PResNet(nn.Module):
 
         # ---- Freezing (after everything is built) ----
         if freeze_at >= 0:
-            self._freeze_parameters(self.conv1)
+            self._freeze_parameters(self.embedder)
             for i in range(min(freeze_at, num_stages)):
-                self._freeze_parameters(self.res_layers[i])
+                self._freeze_parameters(self.encoder["stages"][i])
         if freeze_norm:
             freeze_batch_norm2d(self)  # root is not a BN → children replaced in place
 
@@ -242,9 +236,9 @@ class PResNet(nn.Module):
             p.requires_grad_(False)
 
     def forward(self, x: Tensor) -> list[Tensor]:
-        x = self.pool(self.conv1(x))
+        x = self.embedder(x)
         outs = []
-        for i, stage in enumerate(self.res_layers):
+        for i, stage in enumerate(self.encoder["stages"]):
             x = stage(x)
             if i in self.return_idx:
                 outs.append(x)
