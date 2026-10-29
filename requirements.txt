@@ -12,3 +12,7 @@ onnx>=1.15.0
 onnxruntime>=1.16.0
 ruff>=0.1.0
 pytest>=7.4.0
+
+# dev/test only: HF reference weights + parity tests (keys dumped with transformers 5.15.0.dev0)
+transformers>=5.0
+safetensors>=0.4

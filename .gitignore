@@ -61,3 +61,4 @@ Thumbs.db
 *.jpeg
 !docs/**/*.png
 !docs/**/*.jpg
+HANDOFF.md
