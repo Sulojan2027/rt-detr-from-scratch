@@ -62,3 +62,4 @@ Thumbs.db
 !docs/**/*.png
 !docs/**/*.jpg
 HANDOFF.md
+test.ipynb

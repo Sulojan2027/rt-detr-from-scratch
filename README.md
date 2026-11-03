@@ -102,8 +102,8 @@ src/
 ## Development workflow
 
 - `main`: stable, always mergeable
-- `dev`: integration branch, PRs land here first
-- `feat/<component>`: feature branches (e.g. `feat/hybrid-encoder`)
+- `encoder`: backbone + hybrid encoder work (Person A); merges into `main`
+- No CI yet (added at the end). Run `pytest tests/ -m "not slow"` and `ruff check src/ tests/` locally; `-m slow` runs the HF parity tests (downloads weights)
 - PRs require: shape checks with dummy input, a note on which paper section it implements, and (where feasible) a unit test
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for details.
