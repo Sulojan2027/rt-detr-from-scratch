@@ -25,3 +25,16 @@ def encoder_state_dict(hf_sd: dict[str, Tensor]) -> dict[str, Tensor]:
     proj = strip_prefix(hf_sd, ENCODER_PREFIXES[0], keep="encoder_input_proj.")
     enc_body = strip_prefix(hf_sd, ENCODER_PREFIXES[1])
     return proj | enc_body
+
+
+# Person B: HF keeps query selection + decoder directly under `model.` (siblings of `model.encoder`).
+DECODER_PARTS = ("decoder_input_proj", "denoising_class_embed", "enc_output", "enc_score_head", "enc_bbox_head", "decoder")
+
+
+def decoder_state_dict(hf_sd: dict[str, Tensor]) -> dict[str, Tensor]:
+    """HF `model.<part>.*` for each of DECODER_PARTS → `RTDetrTransformer` keys (strip `model.` only).  [skeleton]"""
+    # Hints:
+    # 1. One strip_prefix call per part: prefix f"model.{part}.", keep f"{part}." — then merge the dicts.
+    # 2. Same dot trick as the encoder: "model.decoder_input_proj.0..." does NOT start with "model.decoder.".
+    # Self-check: 137 keys (R18) / 239 (R50); strict load into RTDetrTransformer(num_decoder_layers=3 / 6).
+    raise NotImplementedError
