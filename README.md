@@ -38,8 +38,8 @@ RT-DETR removes the need for NMS post-processing (unlike YOLO-family detectors) 
 | Post-processing | 🟨 Skeleton | `src/postprocess.py` (shared) |
 | COCO data pipeline | 🟨 Skeleton | `src/data/` (shared) |
 | COCO eval (mAP) | 🟨 Skeleton | `src/eval/coco_eval.py`, `scripts/eval.py` (shared) |
-| Training loop | ⬜ Not planned | goal is pretrained-weight parity, not training |
-| Speed benchmark (FPS/latency) | ⬜ Optional | |
+| Training loop | ⬜ Not planned | we load the authors' pretrained weights into our implementation |
+| Speed benchmark (latency incl. NMS) vs YOLO | ⬜ Not started | core goal: RT-DETR vs YOLO |
 
 Use ⬜ Not started / 🟨 Skeleton or in progress / ✅ Done. Skeleton files contain signatures, shapes, hints and self-check numbers; they raise `NotImplementedError` until filled in.
 
