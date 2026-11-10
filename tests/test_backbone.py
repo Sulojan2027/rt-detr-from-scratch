@@ -5,8 +5,7 @@ import torch.nn as nn
 from src.backbone import PResNet
 from src.backbone.common import FrozenBatchNorm2d
 from src.backbone.presnet import BasicBlock, Blocks, BottleNeck
-
-HF_PREFIX = "model.backbone.model."
+from src.utils.hf_weights import backbone_state_dict
 
 # depth → (out_channels, params in millions with freeze_norm=False)
 EXPECTED = {
@@ -96,7 +95,7 @@ def test_gradients_flow():
 def test_hf_parity(depth):
     transformers = pytest.importorskip("transformers")
     hf = transformers.RTDetrForObjectDetection.from_pretrained(f"PekingU/rtdetr_r{depth}vd").eval()
-    sd = {k[len(HF_PREFIX):]: v for k, v in hf.state_dict().items() if k.startswith(HF_PREFIX)}
+    sd = backbone_state_dict(hf.state_dict())
 
     model = PResNet(depth, freeze_norm=True).eval()
     model.load_state_dict(sd, strict=True)
