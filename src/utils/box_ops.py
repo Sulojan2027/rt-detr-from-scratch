@@ -1,4 +1,4 @@
-"""Box helpers shared by query selection, denoising, matcher, losses and post-processing.  [SHARED — skeleton]
+"""Box helpers shared by query selection, denoising, matcher, losses and post-processing.  [SHARED]
 
 Conventions (same as HF):
 - Boxes are **normalised** to [0, 1] by image width / height.
@@ -18,30 +18,37 @@ Self-checks once written:
     inverse_sigmoid(torch.sigmoid(x))             ≈ x   (for |x| < ~10)
 """
 
-from torch import Tensor  # you will also need `import torch` (stack, max/min, log)
+import torch
+from torch import Tensor
 
 
 def box_cxcywh_to_xyxy(boxes: Tensor) -> Tensor:
     """[..., 4] (cx, cy, w, h) → (x1, y1, x2, y2)."""
-    # Hints:
-    # 1. cx, cy, w, h = boxes.unbind(-1)
-    # 2. x1 = cx - 0.5 * w, y1 = ..., x2 = cx + 0.5 * w, y2 = ...
-    # 3. torch.stack([x1, y1, x2, y2], dim=-1) — works for any number of leading dims.
-    raise NotImplementedError
+    cx, cy, w, h = boxes.unbind(-1)
+    x1 = cx - 0.5 * w
+    y1 = cy - 0.5 * h
+    x2 = cx + 0.5 * w
+    y2 = cy + 0.5 * h
+    return torch.stack([x1, y1, x2, y2], dim=-1)
 
 
 def box_xyxy_to_cxcywh(boxes: Tensor) -> Tensor:
-    """[..., 4] (x1, y1, x2, y2) → (cx, cy, w, h). Inverse of `box_cxcywh_to_xyxy`."""
-    raise NotImplementedError
-
+    """[..., 4] (x1, y1, x2, y2) → (cx, cy, w, h)."""
+    x1, y1, x2, y2 = boxes.unbind(-1)
+    cx = 0.5 * (x2 + x1)
+    cy = 0.5 * (y1 + y2)
+    w = x2 - x1
+    h = y2 - y1
+    return torch.stack([cx, cy, w, h], dim=-1)
 
 def box_area(boxes: Tensor) -> Tensor:
     """[N, 4] xyxy → [N] areas."""
-    raise NotImplementedError
+    x1, y1, x2, y2 = boxes.unbind(-1)
+    return (x2 - x1) * (y2 - y1)
 
 
 def box_iou(boxes1: Tensor, boxes2: Tensor) -> tuple[Tensor, Tensor]:
-    """Pairwise IoU. [N, 4], [M, 4] xyxy → (iou [N, M], union [N, M])."""
+    """Pairwise IoU. [N, 4], [M, 4] xyxy → (iou [N, M], union [N, M]).  [optional — training only: matcher / loss]"""
     # Hints:
     # 1. Broadcast: boxes1[:, None, :2] is [N, 1, 2], boxes2[None, :, :2] is [1, M, 2].
     # 2. Intersection top-left = max of the two top-lefts; bottom-right = min of the two bottom-rights.
@@ -51,7 +58,7 @@ def box_iou(boxes1: Tensor, boxes2: Tensor) -> tuple[Tensor, Tensor]:
 
 
 def generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
-    """Pairwise GIoU in [-1, 1]. [N, 4], [M, 4] xyxy → [N, M]."""
+    """Pairwise GIoU in [-1, 1]. [N, 4], [M, 4] xyxy → [N, M].  [optional — training only: matcher / loss]"""
     # Hints:
     # 1. iou, union = box_iou(boxes1, boxes2)
     # 2. Enclosing box C: top-left = MIN of top-lefts, bottom-right = MAX of bottom-rights (opposite of step 2 above).
@@ -62,9 +69,10 @@ def generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
 
 def inverse_sigmoid(x: Tensor, eps: float = 1e-5) -> Tensor:
     """logit(x) = log(x / (1 - x)), clamped so 0 and 1 don't give ±inf. Used for box refinement in logit space."""
-    # Hint: copy HF exactly — clamp x to [0, 1], then x1 = x.clamp(min=eps), x2 = (1 - x).clamp(min=eps),
-    # return torch.log(x1 / x2). Exact copy matters for decoder parity.
-    raise NotImplementedError
+    x = x.clamp(min=0, max=1)
+    x1 = x.clamp(min=eps)
+    x2 = (1 - x).clamp(min=eps)
+    return torch.log(x1 / x2)
 
 
 __all__ = [

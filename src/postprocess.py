@@ -1,4 +1,4 @@
-"""Model outputs → final detections per image.  [SHARED — skeleton]
+"""Model outputs → final detections per image.  [SHARED]
 
 RT-DETR needs **no NMS**: the Hungarian matcher trains each object to one query, so post-processing is only
 "score, pick top-k, convert boxes".
@@ -22,7 +22,10 @@ Self-check once written (should be EXACT, diff 0.0):
     → same scores / labels / boxes (try the COCO cats image, val2017/000000039769.jpg).
 """
 
+import torch
 from torch import Tensor
+
+from src.utils.box_ops import box_cxcywh_to_xyxy
 
 
 def post_process(
@@ -33,15 +36,21 @@ def post_process(
     num_top: int | None = None,
 ) -> list[dict[str, Tensor]]:
     """[B, Q, C] logits + [B, Q, 4] cxcywh boxes → per-image dicts of scores / labels / xyxy pixel boxes."""
-    # Hints:
-    # 1. boxes = box_cxcywh_to_xyxy(pred_boxes)                       (src/utils/box_ops.py)
-    # 2. Scale: img_h, img_w = target_sizes.unbind(1); scale = stack([img_w, img_h, img_w, img_h], 1) → [B, 4];
-    #    boxes = boxes * scale[:, None, :]. Watch the order: sizes are (h, w) but boxes are (x, y, x, y).
-    # 3. scores = logits.sigmoid()  → [B, Q, C]. One query can score for several classes.
-    # 4. Top-k over the FLATTENED [B, Q*C] scores (k = num_top or Q):
-    #       scores, index = scores.flatten(1).topk(k, dim=-1)
-    #       labels = index % C          ← which class
-    #       query  = index // C         ← which query (box)
-    # 5. boxes = boxes.gather(1, query.unsqueeze(-1).repeat(1, 1, 4))
-    # 6. Per image keep score > threshold. For COCO mAP use threshold=0.0 (mAP needs low-score detections too).
-    raise NotImplementedError
+    boxes = box_cxcywh_to_xyxy(pred_boxes)
+    img_h, img_w = target_sizes.unbind(1)
+    scale = torch.stack([img_w, img_h, img_w, img_h], 1).to(boxes)      # sizes are (h, w), boxes are (x, y, x, y)
+    boxes = boxes * scale[:, None, :]
+    scores = logits.sigmoid()                                          # no softmax: no "no-object" class
+    _, Q, C = scores.shape
+    if num_top is None:
+        num_top = Q
+    scores, index = scores.flatten(1).topk(num_top, dim=-1)
+    labels = index % C
+    query = index // C
+    boxes = boxes.gather(1, query.unsqueeze(-1).repeat(1, 1, 4))
+
+    results = []
+    for score, label, box in zip(scores, labels, boxes, strict=True):
+        keep = score > threshold
+        results.append({"scores": score[keep], "labels": label[keep], "boxes": box[keep]})
+    return results

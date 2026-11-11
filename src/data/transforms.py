@@ -1,25 +1,36 @@
-"""Image + target transforms.  [SHARED — skeleton]
+"""Eval-time image + target transforms (no training augmentations — we use pretrained weights).  [SHARED]
 
 Every transform takes and returns `(image, target)` so boxes stay in sync with the image.
 
-What the PekingU checkpoints expect (from `AutoImageProcessor.from_pretrained("PekingU/rtdetr_r18vd")`):
-    do_resize=True,  size 640×640 (NO aspect-ratio keep, NO padding), resample=BILINEAR (PIL id 2)
-    do_rescale=True, factor 1/255
-    do_normalize=False  ← no ImageNet mean/std! Feeding normalised images silently drops mAP.
+What the PekingU checkpoints expect (`AutoImageProcessor.from_pretrained("PekingU/rtdetr_r18vd")`):
+    resize to 640×640 (NO aspect-ratio keep, NO padding), bilinear + antialias
+    rescale ×1/255
+    NO mean/std normalisation  ← feeding ImageNet-normalised images silently drops mAP
+
+EXACT recipe (verified: diff 0.0 vs the HF processor on 4 image sizes). HF uses **torchvision v2** on **uint8**:
+    import torchvision.transforms.v2.functional as F2
+    x = F2.pil_to_tensor(img)                                          # uint8 [3, H, W]
+    x = F2.resize(x, [640, 640], interpolation=InterpolationMode.BILINEAR, antialias=True)   # still uint8
+    x = F2.to_dtype(x, torch.float32, scale=True)                      # float [0, 1]
+Order matters: resize BEFORE converting to float. PIL `Image.resize` or v1 `TF.resize` give ±1/255 on ~0.14 % of pixels.
 
 Target format inside the pipeline (HF convention):
     target = {"image_id": int, "class_labels": LongTensor[N] (0..79),
               "boxes": FloatTensor[N, 4] normalised (cx, cy, w, h),
               "orig_size": LongTensor[2] (h, w), "size": LongTensor[2] (h, w)}
+Key insight: boxes are **normalised**, so `Resize` does NOT touch them — only update target["size"].
 
-Key insight: boxes are **normalised**, so `Resize` does NOT touch them — only flips / crops do.
-
-Self-check once written: for one val image, `ToTensor()(Resize(640)(img, t))[0]` vs
-`proc(images=img, return_tensors="pt").pixel_values[0]` → max abs diff 0.0 (both use PIL bilinear) or < 1/255.
+Self-check once written:
+    x, t = build_transforms()(img, target)
+    x.shape == (3, 640, 640), x.dtype == float32, 0 <= x <= 1
+    (x - proc(images=img, return_tensors="pt").pixel_values[0]).abs().max() == 0.0
+    t["boxes"] unchanged, t["size"] == [640, 640], t["orig_size"] unchanged
 """
 
+import torch
+import torchvision.transforms.v2.functional as F2
 from torch import Tensor
-
+from torchvision.transforms import InterpolationMode
 
 class Compose:
     """Apply transforms in order: `image, target = t(image, target)` for each t."""
@@ -28,43 +39,32 @@ class Compose:
         self.transforms = transforms
 
     def __call__(self, image, target: dict):
-        raise NotImplementedError
+        for transform in self.transforms:
+            image, target = transform(image, target)
+        return image, target
 
-
-class Resize:
-    """PIL image → PIL image of (height, width). Boxes unchanged (normalised); update target["size"]."""
-
-    def __init__(self, size: int | tuple[int, int] = 640) -> None:
-        # Hint: store (h, w); an int means square.
-        raise NotImplementedError
-
-    def __call__(self, image, target: dict):
-        # Hints:
-        # 1. PIL wants (w, h): image.resize((w, h), Image.BILINEAR)  ← same op as HF, so parity is exact.
-        # 2. target["size"] = torch.tensor([h, w]). Don't touch target["boxes"].
-        raise NotImplementedError
-
-
-class RandomHorizontalFlip:
-    """Training only. With prob p: flip the image and set box cx → 1 - cx (w, h, cy unchanged)."""
-
-    def __init__(self, p: float = 0.5) -> None:
-        self.p = p
-
-    def __call__(self, image, target: dict):
-        # Hint: image.transpose(Image.FLIP_LEFT_RIGHT); boxes[:, 0] = 1 - boxes[:, 0] (clone first, don't edit in place).
-        raise NotImplementedError
-
-
-class ToTensor:
-    """PIL uint8 [H, W, 3] → float [3, H, W] in [0, 1] (rescale only, no mean/std)."""
+class PILToTensor:
+    """PIL RGB image → uint8 tensor [3, H, W] (no scaling yet)."""
 
     def __call__(self, image, target: dict) -> tuple[Tensor, dict]:
-        # Hint: torchvision.transforms.functional.pil_to_tensor(image).float() / 255.0  (or F.to_tensor).
-        raise NotImplementedError
+        return F2.pil_to_tensor(image), target
 
+class Resize:
+    """uint8 [3, H, W] → uint8 [3, h, w]. Boxes unchanged (normalised); update target["size"]."""
 
-def build_transforms(train: bool, size: int = 640) -> Compose:
-    """train: flip → resize → to-tensor. eval: resize → to-tensor."""
-    # Hint: RT-DETR training also uses photometric distort, zoom-out, IoU crop. Skip them unless you train.
-    raise NotImplementedError
+    def __init__(self, size: int | tuple[int, int] = 640) -> None:
+        self.h, self.w = (size, size) if isinstance(size, int) else size
+
+    def __call__(self, image: Tensor, target: dict) -> tuple[Tensor, dict]:
+        resized_image = F2.resize(image, [self.h, self.w], interpolation=InterpolationMode.BILINEAR, antialias=True)
+        return resized_image, {**target, "size": torch.tensor([self.h, self.w])}
+
+class ToDtype:
+    """uint8 [0, 255] → float32 [0, 1]. No mean/std."""
+
+    def __call__(self, image: Tensor, target: dict) -> tuple[Tensor, dict]:
+        return F2.to_dtype(image, torch.float32, scale=True), target
+
+def build_transforms(size: int = 640) -> Compose:
+    """PILToTensor → Resize(size) → ToDtype."""
+    return Compose([PILToTensor(), Resize(size), ToDtype()])

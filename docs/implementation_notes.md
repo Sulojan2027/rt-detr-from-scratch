@@ -134,6 +134,6 @@ Skeleton: `src/losses/rtdetr_loss.py`, Person B.
 ## Training / data pipeline / eval
 
 Skeletons (shared): `src/utils/box_ops.py`, `src/postprocess.py`, `src/data/{coco,transforms}.py`, `src/eval/coco_eval.py`, `scripts/eval.py`.
-Preprocessing must match the PekingU image processor: resize to 640×640 (no aspect keep, bilinear), divide by 255, **no mean/std normalisation**. Labels are contiguous 0..79; COCO category ids (1..90 with gaps) are mapped via `sorted(coco.getCatIds())`.
+Preprocessing must match the PekingU image processor: torchvision **v2** `resize` of the **uint8** image to 640×640 (bilinear, antialias, no aspect keep), then `to_dtype(float32, scale=True)`, **no mean/std normalisation**. This is bit-exact with HF; PIL or v1 resize is off by 1/255 on ~0.14 % of pixels. Labels are contiguous 0..79; COCO category ids (1..90 with gaps) are mapped via `sorted(coco.getCatIds())`.
 
 *(fill in once implemented)*
