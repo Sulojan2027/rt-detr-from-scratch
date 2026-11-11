@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     # Hints:
-    # 1. Dataset: CocoDetection(coco/val2017, coco/annotations/instances_val2017.json, build_transforms(train=False))
+    # 1. Dataset: CocoDetection(coco/val2017, coco/annotations/instances_val2017.json, build_transforms())
     #    --limit → torch.utils.data.Subset(ds, range(limit)). DataLoader(..., collate_fn=collate_fn, num_workers=4).
     # 2. Model: hf = RTDetrForObjectDetection.from_pretrained(f"PekingU/rtdetr_r{args.depth}vd").eval().to(device)
     #    mode "ours": build PResNet + HybridEncoder from HF_CONFIGS[depth], strict-load with backbone_state_dict /

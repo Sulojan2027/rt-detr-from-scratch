@@ -41,7 +41,6 @@ def box_xyxy_to_cxcywh(boxes: Tensor) -> Tensor:
     h = y2 - y1
     return torch.stack([cx, cy, w, h], dim=-1)
 
-
 def box_area(boxes: Tensor) -> Tensor:
     """[N, 4] xyxy → [N] areas."""
     x1, y1, x2, y2 = boxes.unbind(-1)
