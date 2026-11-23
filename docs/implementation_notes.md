@@ -109,31 +109,127 @@ return [P3, N4, N5]
 
 ## Query Selection
 
-Skeleton: `src/decoder/rtdetr_transformer.py` (`generate_anchors`, `RTDetrTransformer`), Person B. HF keys under `model.` are listed in `docs/hf_keys_r{18,50}.txt` § decoder; loader stub `src/utils/hf_weights.py::decoder_state_dict`.
+`src/decoder/rtdetr_transformer.py` (`generate_anchors`, `RTDetrTransformer`); weight loader `src/utils/hf_weights.py::decoder_state_dict`.
 
-*(fill in once implemented)*
+- **Paper reference:** §4.2 (uncertainty-minimal query selection), Fig. 2
+- **Official repo reference:** `rtdetr_pytorch/src/zoo/rtdetr/rtdetr_decoder.py` (`RTDETRTransformer`); HF `RTDetrModel.__init__` / `RTDetrModel.forward` after the encoder, and `RTDetrModel._cached_generate_anchors`
+- **What we did:** `[P3, N4, N5]` → `decoder_input_proj` (1×1 conv + BN) → flatten to one `[B, S, 256]` token sequence (S = 8400 at 640²) → one anchor box per token → `enc_output` + `enc_score_head` + `enc_bbox_head` score and box every token → top-300 tokens by their best class score become the decoder's starting boxes (`ref_unact`) and content queries (`target`) → decoder.
+
+```
+anchors, valid = generate_anchors(spatial_shapes)           # (cx, cy, w, h) = (cell centre, 0.05 · 2^level), logit space
+out_mem  = enc_output(valid * memory)                       # invalid anchors are zeroed BEFORE the heads
+cls      = enc_score_head(out_mem)                          # [B, S, 80]
+coord    = enc_bbox_head(out_mem) + anchors                 # [B, S, 4]  logit space
+top      = cls.max(-1).values.topk(300).indices             # [B, 300]
+ref, target = coord[top], out_mem[top].detach()
+logits, boxes = decoder(target, ref.detach(), memory, spatial_shapes)    # memory is the UNmasked sequence
+```
+
+- **Parity** (random image, our decoder fed HF's own P3–P5, PekingU weights, max abs diff; `tests/test_rtdetr_transformer.py`, `pytest -m slow`):
+
+| Check | R18 | R50 |
+|---|---|---|
+| query selection `enc_outputs_class` | 0.0 | 0.0 |
+| final scores (sigmoid), 640² / 320×416 | 6.9e-7 / 1.9e-6 | 7.0e-7 / 5.1e-7 |
+| final boxes, 640² / 320×416 | 8.6e-6 / 2.7e-6 | 1.0e-6 / 2.6e-6 |
+| image → our backbone + encoder + decoder, vs HF full forward, on a real COCO image: scores / boxes (px) | 2.4e-7 / 6.1e-5 | 1.2e-7 / 4.8e-5 |
+
+- **Parameters** (query selection + decoder): R18 4,019,376 (3 layers), R50 7,466,508 (6 layers). Whole model: R18 20.17 M, R50 42.89 M.
+- **Weight loading:** `decoder_state_dict(hf_sd)` strips `model.` from `decoder_input_proj`, `denoising_class_embed`, `enc_output`, `enc_score_head`, `enc_bbox_head` and `decoder`. Keys: R18 137, R50 239. With the backbone and encoder loaders, all 526 (R18) / 764 (R50) checkpoint keys are loaded exactly once (checked by tensor identity; none missed, none twice).
+- **Why it differs from HF:**
+  1. `forward` returns a plain dict (`logits`, `pred_boxes`, `aux_outputs`, `enc_outputs_class`, and `dn_outputs` / `dn_meta` while training with targets) instead of `RTDetrModelOutput`. The last entry of `aux_outputs` is the encoder top-k proposal, as in HF's loss input.
+  2. No `learn_initial_query`, `anchor_image_size` anchor cache or extra stride-2 input projections: the PekingU configs don't use them. Anchors are recomputed on every forward (cheap).
+  3. Dropout and output-recording hooks (hidden states, attentions) are omitted.
+- **Gotchas:**
+  - **Two different memories.** The score / box heads see `valid_mask * memory`; the decoder cross-attends to the **unmasked** memory. Using the masked one for both runs fine and quietly breaks parity.
+  - **Invalid anchors are `finfo.max`, not `inf`** (same as HF, so adding the box head output stays finite). The top-k ranks tokens by class score only, so an invalid token is not excluded by this; its box is simply saturated. Matching HF here is what keeps parity exact.
+  - **`target` is detached and `ref` is detached** before the decoder. The "IoU-aware" part of the paper happens in training (VFL teaches `enc_score_head` to score ≈ IoU), so inference is a plain top-k.
+  - **`denoising_class_embed` has 81 rows** (80 classes + padding index 80), so the strict load fails if it has 80.
+  - In tests, HF's `RTDetrConfig()` defaults to `num_labels=2` and 6 decoder layers; build it with `num_labels=80, decoder_layers=3` for R18-shaped checks.
 
 ## Decoder
 
-Skeletons: `src/decoder/deformable_attention.py`, `src/decoder/decoder.py`, `src/decoder/denoising.py`, Person B. Can reuse `src.encoder.aifi.SelfAttention` / `MLP` (same HF names); `SelfAttention` needs an optional `attn_mask` for denoising.
+`src/decoder/deformable_attention.py`, `decoder.py`, `denoising.py`.
 
-*(fill in once implemented)*
+- **Paper reference:** §4.3 / Fig. 2 (decoder with auxiliary heads); deformable attention from Deformable DETR (arXiv:2010.04159 §4.1); denoising from DINO (arXiv:2203.03605 §3.3)
+- **Official repo reference:** `rtdetr_pytorch/src/zoo/rtdetr/rtdetr_decoder.py` (`MSDeformableAttention`, `TransformerDecoderLayer`, `TransformerDecoder`), `denoising.py`; HF `RTDetrMultiscaleDeformableAttention`, `MultiScaleDeformableAttention`, `RTDetrDecoderLayer`, `RTDetrDecoder`, `RTDetrMLPPredictionHead`, `get_contrastive_denoising_training_group`
+- **What we did:**
+
+| Ours | HF | Notes |
+|---|---|---|
+| `multi_scale_deformable_attn` | `MultiScaleDeformableAttention` (PyTorch path) | `grid_sample` per level, heads folded into the batch |
+| `MultiscaleDeformableAttention` (`sampling_offsets`, `attention_weights`, `value_proj`, `output_proj`) | `RTDetrMultiscaleDeformableAttention` | 205,600 params |
+| `DecoderLayer` (`self_attn`, `encoder_attn`, `mlp`, 3 layer norms) | `RTDetrDecoderLayer` | post-norm, relu FFN; 995,872 params |
+| `Decoder` (`layers`, `query_pos_head`, `class_embed`, `bbox_embed`) | `RTDetrDecoder` + heads attached by `RTDetrForObjectDetection` | R18 3 layers (3,581,020 params), R50 6 (7,028,152) |
+| `MLPPredictionHead` | `RTDetrMLPPredictionHead` | `layers` ModuleList, ReLU between, none after the last |
+
+  Per layer: `pos = query_pos_head(ref)` → self-attention (pos on Q, K only) → deformable cross-attention over the memory (pos on the offset / weight prediction) → FFN → `new_ref = sigmoid(bbox_embed[i](x) + inverse_sigmoid(ref))` → `logits_i = class_embed[i](x)`. The last layer is the prediction; earlier ones feed the auxiliary losses.
+- **Reuse:** `SelfAttention` and `MLP` come from `src/encoder/aifi.py` (same HF names). **`SelfAttention` gained an optional additive `attn_mask`** (default `None`, so the encoder is unchanged) for denoising.
+- **Parity:** `tests/test_deformable_attention.py` and `tests/test_decoder.py` load random HF weights into our modules with `strict=True` (no key remapping) and compare: core function ≤ 1e-6, attention module ≤ 1e-5, decoder (3 and 6 layers) ≤ 1e-4; end-to-end numbers are in the Query Selection table.
+- **Why it differs:** pure-PyTorch `grid_sample` only (no CUDA kernel, no `level_start_index` / `im2col_step`), no dropout, no recorded intermediate hidden states, `Decoder.forward` returns `(logits, boxes)` stacked over layers `[B, L, Q, ·]`.
+- **Gotchas:**
+  - **`grid_sample` convention.** `align_corners=False` and the `2·loc − 1` mapping must match exactly, otherwise every box shifts by half a pixel. A hand-checked test (sampling a pixel centre returns that pixel) guards it.
+  - **One softmax over levels × points together,** not one per level.
+  - **Offsets are scaled by half the reference box size** (`offsets / n_points · wh · 0.5`), so points land inside / around the box.
+  - **Keep the gradient on the output box, feed a detached one forward.** `all_boxes.append(new_ref)` but `ref = new_ref.detach()`. Swapping them does not break parity, only training.
+  - **`reference_points` shape.** The deformable attention takes `[B, Q, 1, 4]` (a level axis of size 1 that broadcasts); the decoder passes `ref.unsqueeze(2)`.
+- **Denoising (`denoising.py`, training only):**
+  - A group is `[positives | negatives]`, each a noisy copy of every GT padded to `max_gt`; `num_groups = max(100 // max_gt, 1)`. 3 GTs → 33 groups → 198 denoising queries.
+  - Label noise swaps a real label for a random class with probability `label_noise_ratio · 0.5` (padding is never touched). Box noise shifts the corners by a random fraction of half the box size: positives 0–1×, negatives 1–2×, clipped to [0, 1], then `inverse_sigmoid`.
+  - The attention mask is `[N_dn + Q]²`, 0 = allowed, −inf = blocked: normal queries cannot see any denoising query (they would read the answer), and each group cannot see the other groups.
+  - `dn_positive_idx` (per image, `n_gt · num_groups` entries) is the fixed assignment the loss uses instead of the matcher.
+  - **Same seed → bit-identical to HF.** We call the same random ops in the same order (`rand_like`, `randint_like`, `randint_like`, `rand_like`) and keep the labels `int32` like HF. `tests/test_denoising.py` checks equality with HF under a shared seed, and `tests/test_rtdetr_transformer.py` checks the whole training forward (normal and denoising outputs) against HF.
+  - `RTDetrTransformer.forward` builds the group only when `self.training and targets is not None`, then splits the denoising queries off again, so `logits` / `pred_boxes` look the same as at inference and the denoising part is returned as `dn_outputs` (one entry per decoder layer, including the last).
 
 ## Matcher
 
-Skeleton: `src/matcher/hungarian.py`, Person B.
+`src/matcher/hungarian.py`
 
-*(fill in once implemented)*
+- **Paper reference:** §4 (set prediction as in DETR, arXiv:2005.12872 §3.1)
+- **Official repo reference:** `rtdetr_pytorch/src/zoo/rtdetr/matcher.py`; HF `RTDetrHungarianMatcher` in `transformers/loss/loss_rt_detr.py`
+- **What we did:** one cost matrix for the whole batch (rows = all `B·Q` queries, columns = every GT of every image), `cost = 2·class + 5·L1 + 2·(−GIoU)`, then `scipy.optimize.linear_sum_assignment` on each image's own block of columns. Returns `(query_idx, gt_idx)` per image, `K = min(Q, N)`; an image without GT gives empty tensors.
+  - Class cost is focal-style on sigmoid probabilities: `α(1−p)^γ·−log p − (1−α)p^γ·−log(1−p)` with the **matcher's own α = 0.25, γ = 2** (the VFL loss uses α = 0.75).
+  - L1 is on `(cx, cy, w, h)` (`torch.cdist(p=1)`); GIoU on the corner boxes.
+- **Parity:** identical index lists to HF's matcher on random batches with 300 queries (`tests/test_matcher.py`).
+- **Why it differs:** only the focal branch is implemented (the HF softmax branch is not used by RT-DETR).
+- **Gotchas:**
+  - **Costs that are `nan` / `inf` are replaced by `finfo.max`** so the solver cannot crash; such a pair is only chosen when nothing better exists. This covers e.g. nan class scores. A nan *box* is rejected earlier: `generalized_box_iou` raises on any box that fails `x2 ≥ x1`, and nan fails that test (HF behaves the same).
+  - The split by `sizes` matters: an image may only be matched to its own GTs, and the returned `gt_idx` is local to the image.
+  - Matching runs under `@torch.no_grad()` on CPU (`scipy`), so it does not slow down the GPU graph but does synchronise.
 
 ## Losses
 
-Skeleton: `src/losses/rtdetr_loss.py`, Person B.
+`src/losses/rtdetr_loss.py`
 
-*(fill in once implemented)*
+- **Paper reference:** §4.2 (VFL makes the class score IoU-aware, which is what the query selection relies on)
+- **Official repo reference:** `rtdetr_pytorch/src/zoo/rtdetr/rtdetr_criterion.py`; HF `RTDetrLoss` (`loss_labels_vfl`, `loss_boxes`, `get_cdn_matched_indices`)
+- **What we did:** `RTDetrLoss(matcher)` returns a dict of **already weighted** losses; the training loss is `sum(losses.values())`.
+  - `loss_vfl` (weight 1): BCE where the target of the matched class is the IoU of the matched pair (detached) instead of 1, with weight `α·σ(logit)^γ` on negatives (α = 0.75, γ = 2) and the IoU on positives; `mean(over classes).sum() · Q / num_boxes`.
+  - `loss_bbox` (weight 5): L1 on `(cx, cy, w, h)`, summed over matched pairs / `num_boxes`. `loss_giou` (weight 2): `1 − GIoU`, same normalisation.
+  - Final layer: matched once. Each entry of `outputs["aux_outputs"]` (earlier decoder layers, then the encoder top-k proposals) is **re-matched** on its own predictions → keys `…_aux_{i}`.
+  - Denoising (`outputs["dn_outputs"]`, one per layer): fixed assignment from `get_cdn_matched_indices`, `num_boxes · dn_num_group` → keys `…_dn_{i}`.
+  - `num_boxes = max(total GTs in the batch, 1)`.
+- **Parity:** same keys and values within 1e-5 of HF's `RTDetrLoss` for random outputs with 3 auxiliary layers, an image with no objects, and 2 denoising layers (`tests/test_loss.py`).
+- **Why it differs:** input keys are `aux_outputs` / `dn_outputs` / `dn_meta` (HF: `auxiliary_outputs` / `dn_auxiliary_outputs` / `denoising_meta_values`; the tests convert). Only VFL + boxes are implemented, not HF's other variants (CE, BCE, focal, masks, cardinality). Splitting the denoising queries off the main output is done in `RTDetrTransformer.forward`, not in the loss (HF does it in `RTDetrForObjectDetectionLoss`). No multi-GPU all-reduce of `num_boxes`.
+- **Gotchas:**
+  - The IoU inside VFL is a **target**: compute it from `pred_boxes.detach()`, or the class loss pushes the boxes.
+  - The **no-object** class exists only as an extra one-hot column that is dropped again, so unmatched queries are all-zero targets (not a separate class).
+  - The matcher's α (0.25) and the VFL's α (0.75) are different numbers on purpose.
+  - Images without GT must still work: `num_boxes` is clamped to 1, the box losses are 0 and VFL only teaches "no object".
+  - There is no training loop in this repo; the matcher, loss and denoising are checked against HF and run end to end (`test_training_with_denoising_output_structure_and_backward`: transformer → matcher → loss → backward).
 
 ## Training / data pipeline / eval
 
 Skeletons (shared): `src/utils/box_ops.py`, `src/postprocess.py`, `src/data/{coco,transforms}.py`, `src/eval/coco_eval.py`, `scripts/eval.py`.
 Preprocessing must match the PekingU image processor: torchvision **v2** `resize` of the **uint8** image to 640×640 (bilinear, antialias, no aspect keep), then `to_dtype(float32, scale=True)`, **no mean/std normalisation**. This is bit-exact with HF; PIL or v1 resize is off by 1/255 on ~0.14 % of pixels. Labels are contiguous 0..79; COCO category ids (1..90 with gaps) are mapped via `sorted(coco.getCatIds())`.
 
-*(fill in once implemented)*
+### `box_iou` / `generalized_box_iou` — `src/utils/box_ops.py`
+
+- **What we did:** pairwise `[N, 4] × [M, 4]` xyxy → IoU (+ union) and GIoU in `[-1, 1]`, used by the matcher and the loss. Matches torchvision within 1e-6 and HF's versions exactly (`tests/test_box_ops.py`).
+- **Gotchas:** the overlap size is clamped to 0 (no overlap must not give a negative area). `generalized_box_iou` raises if any box has `x2 < x1` or `y2 < y1`, which catches `(cx, cy, w, h)` passed by mistake; a nan box also fails that test, so it raises too.
+
+### `scripts/eval.py --mode full`
+
+- **What we did:** our backbone + encoder + `RTDetrTransformer`, no HF module runs (HF only downloads the PekingU weights and is dropped after the state dicts are loaded). All three modes now return `(logits, pred_boxes)` from their `forward`, so they share one evaluation loop.
+- **Checked:** on a 2-image mini COCO folder (the COCO "cats" image and its mirror, with HF's confident detections as stand-in annotations) `hf`, `ours` and `full` give identical metrics; on the cats image the post-processed detections of our full model match HF's (same labels, score diff ≤ 2.4e-7, box diff ≤ 6.1e-5 px for R18 and R50). **Real val2017 mAP has not been run yet** (needs the dataset; expect the same number as `--mode hf`, paper: R18 46.5, R50 53.1).
+- **Gotcha:** the final `print` used `→`, which crashes on Windows consoles (cp1252) after the metrics are computed; it is plain ASCII now.

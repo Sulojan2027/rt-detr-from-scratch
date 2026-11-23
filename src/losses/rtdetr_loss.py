@@ -1,4 +1,4 @@
-"""RT-DETR set-prediction loss: VFL + L1 + GIoU, on final, auxiliary and denoising outputs.  [PERSON B — skeleton]
+"""RT-DETR set-prediction loss: VFL + L1 + GIoU, on final, auxiliary and denoising outputs.
 
 Paper: RT-DETR §4.2 (VFL makes the class score IoU-aware → "uncertainty-minimal query selection").
 HF: `RTDetrLoss` + `RTDetrForObjectDetectionLoss` in `transformers/loss/loss_rt_detr.py`. Training only.
@@ -16,8 +16,11 @@ Self-check: build HF's criterion `RTDetrLoss(hf.config)` and feed it the SAME ou
 loss dict (same keys, values to ~1e-6). Easiest with fake random outputs, no model needed.
 """
 
-import torch.nn as nn
-from torch import Tensor
+import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
+
+from src.utils.box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
 
 
 class RTDetrLoss(nn.Module):
@@ -30,42 +33,107 @@ class RTDetrLoss(nn.Module):
         gamma: float = 2.0,
     ) -> None:
         super().__init__()
-        # Hint: default weight_dict = {"loss_vfl": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0}
-        raise NotImplementedError
+        self.matcher = matcher
+        self.num_classes = num_classes
+        self.weight_dict = weight_dict or {"loss_vfl": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0}
+        self.alpha = alpha
+        self.gamma = gamma
 
     @staticmethod
     def _src_idx(indices: list[tuple[Tensor, Tensor]]) -> tuple[Tensor, Tensor]:
         """Matched (batch_idx, query_idx) for advanced indexing: outputs["pred_boxes"][idx] → [K_total, 4]."""
-        # Hint: batch_idx = cat([full_like(src, i) for i, (src, _) in enumerate(indices)]); query_idx = cat([src ...])
-        raise NotImplementedError
+        batch_idx = torch.cat([torch.full_like(query_idx, i) for i, (query_idx, _) in enumerate(indices)])
+        query_idx = torch.cat([query_idx for query_idx, _ in indices])
+        return batch_idx, query_idx
+
+    @staticmethod
+    def _matched_targets(targets: list[dict], indices: list[tuple[Tensor, Tensor]], key: str) -> Tensor:
+        """The ground-truth `key` values of all matched pairs, in the same order as `_src_idx`."""
+        return torch.cat([t[key][gt_idx] for t, (_, gt_idx) in zip(targets, indices)])
 
     def loss_vfl(self, outputs: dict, targets: list[dict], indices: list, num_boxes: float) -> dict[str, Tensor]:
         """Varifocal loss: BCE where the target for the matched class is the IoU (not 1)."""
-        # Hints (HF loss_labels_vfl):
-        # 1. idx = _src_idx(indices); src_boxes = pred_boxes[idx]; tgt_boxes = matched GT boxes (same order)
-        # 2. ious = diag(box_iou(xyxy(src_boxes.detach()), xyxy(tgt_boxes))[0])          ← detach: IoU is a target
-        # 3. target_classes [B, Q] filled with num_classes; target_classes[idx] = matched GT labels
-        #    one_hot(target_classes, num_classes + 1)[..., :-1]  → [B, Q, C] (drop the "no object" column)
-        # 4. target_score = one_hot * iou (per matched query)
-        # 5. weight = alpha * sigmoid(logits).detach()**gamma * (1 - one_hot) + target_score
-        # 6. loss = BCE_with_logits(logits, target_score, weight=weight, reduction="none").mean(1).sum() * Q / num_boxes
-        raise NotImplementedError
+        logits = outputs["logits"]  # [B, Q, C]
+        idx = self._src_idx(indices)
+
+        # IoU between every matched prediction and its GT. It is a *target*, so no gradient flows through it.
+        pred_boxes = outputs["pred_boxes"][idx]
+        gt_boxes = self._matched_targets(targets, indices, "boxes")
+        ious = box_iou(box_cxcywh_to_xyxy(pred_boxes.detach()), box_cxcywh_to_xyxy(gt_boxes))[0].diag()
+
+        # One-hot class targets [B, Q, C]. Unmatched queries get the extra "no object" class,
+        # which is dropped again afterwards, so they end up as all zeros.
+        target_classes = torch.full(logits.shape[:2], self.num_classes, dtype=torch.int64, device=logits.device)
+        target_classes[idx] = self._matched_targets(targets, indices, "class_labels")
+        one_hot = F.one_hot(target_classes, num_classes=self.num_classes + 1)[..., :-1]
+
+        # The target for the matched class is the IoU instead of 1, so the score learns to mean "how good is my box".
+        iou_per_query = torch.zeros(logits.shape[:2], dtype=logits.dtype, device=logits.device)
+        iou_per_query[idx] = ious.to(logits.dtype)
+        target_score = iou_per_query.unsqueeze(-1) * one_hot
+
+        # Negatives are down-weighted by how confident the model already is (focal-style); positives by their IoU.
+        pred_score = logits.detach().sigmoid()
+        weight = self.alpha * pred_score.pow(self.gamma) * (1 - one_hot) + target_score
+
+        loss = F.binary_cross_entropy_with_logits(logits, target_score, weight=weight, reduction="none")
+        loss = loss.mean(1).sum() * logits.shape[1] / num_boxes
+        return {"loss_vfl": loss}
 
     def loss_boxes(self, outputs: dict, targets: list[dict], indices: list, num_boxes: float) -> dict[str, Tensor]:
         """L1 on cxcywh + (1 - GIoU) on xyxy, both summed over matched pairs / num_boxes."""
-        raise NotImplementedError
+        pred_boxes = outputs["pred_boxes"][self._src_idx(indices)]
+        gt_boxes = self._matched_targets(targets, indices, "boxes")
+
+        loss_bbox = F.l1_loss(pred_boxes, gt_boxes, reduction="none").sum() / num_boxes
+
+        giou = generalized_box_iou(box_cxcywh_to_xyxy(pred_boxes), box_cxcywh_to_xyxy(gt_boxes)).diag()
+        loss_giou = (1 - giou).sum() / num_boxes
+        return {"loss_bbox": loss_bbox, "loss_giou": loss_giou}
 
     @staticmethod
     def get_cdn_matched_indices(dn_meta: dict, targets: list[dict]) -> list[tuple[Tensor, Tensor]]:
         """Denoising queries have a fixed assignment: dn_positive_idx[i] ↔ arange(num_gt).tile(dn_num_group)."""
-        raise NotImplementedError
+        device = targets[0]["class_labels"].device
+        matches = []
+        for positive_idx, target in zip(dn_meta["dn_positive_idx"], targets):
+            num_gt = len(target["class_labels"])
+            if num_gt == 0:
+                empty = torch.zeros(0, dtype=torch.int64, device=device)
+                matches.append((empty, empty))
+                continue
+            # Every denoising group holds a noisy copy of every GT, in the same order.
+            gt_idx = torch.arange(num_gt, dtype=torch.int64, device=device).tile(dn_meta["dn_num_group"])
+            if len(positive_idx) != len(gt_idx):
+                raise ValueError("dn_positive_idx and the number of ground-truth boxes do not agree.")
+            matches.append((positive_idx, gt_idx))
+        return matches
+
+    def _weighted_losses(self, outputs: dict, targets: list[dict], indices: list, num_boxes: float, suffix: str = ""):
+        """VFL + box losses for one set of predictions, each multiplied by its weight."""
+        losses = {**self.loss_vfl(outputs, targets, indices, num_boxes), **self.loss_boxes(outputs, targets, indices, num_boxes)}
+        return {f"{name}{suffix}": value * self.weight_dict[name] for name, value in losses.items()}
 
     def forward(self, outputs: dict, targets: list[dict]) -> dict[str, Tensor]:
-        # Hints (HF RTDetrLoss.forward):
-        # 1. num_boxes = max(total GTs in batch, 1)   (float; with multi-GPU you'd all-reduce it)
-        # 2. indices = matcher(final outputs); losses = loss_vfl + loss_boxes, each × weight_dict[key]
-        # 3. for i, aux in enumerate(outputs["aux_outputs"]): re-match, same losses, keys + f"_aux_{i}"
-        # 4. if "dn_outputs" in outputs: indices = get_cdn_matched_indices(...); num_boxes *= dn_num_group;
-        #    keys + f"_dn_{i}"
-        # 5. Total training loss = sum(losses.values()).
-        raise NotImplementedError
+        """outputs: {"logits", "pred_boxes", optional "aux_outputs", "dn_outputs", "dn_meta"}; targets as in the matcher.
+        → dict of weighted losses; the training loss is `sum(losses.values())`."""
+        # Average number of GT boxes, used to normalise every loss (at least 1, so empty batches work).
+        num_boxes = max(sum(len(t["class_labels"]) for t in targets), 1)
+
+        # Final decoder layer: match once, then supervise the matched pairs.
+        indices = self.matcher(outputs, targets)
+        losses = self._weighted_losses(outputs, targets, indices, num_boxes)
+
+        # Earlier decoder layers and the encoder proposals are matched again on their own predictions.
+        for i, aux in enumerate(outputs.get("aux_outputs", [])):
+            losses.update(self._weighted_losses(aux, targets, self.matcher(aux, targets), num_boxes, f"_aux_{i}"))
+
+        # Denoising queries do not need the matcher: which query belongs to which GT is known in advance.
+        if "dn_outputs" in outputs:
+            dn_meta = outputs["dn_meta"]
+            dn_indices = self.get_cdn_matched_indices(dn_meta, targets)
+            dn_num_boxes = num_boxes * dn_meta["dn_num_group"]
+            for i, dn in enumerate(outputs["dn_outputs"]):
+                losses.update(self._weighted_losses(dn, targets, dn_indices, dn_num_boxes, f"_dn_{i}"))
+
+        return losses

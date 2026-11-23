@@ -31,14 +31,15 @@ RT-DETR removes the need for NMS post-processing (unlike YOLO-family detectors) 
 | AIFI (intra-scale transformer) | ✅ Done | HF parity ~2e-6 |
 | CCFM / CCFF (cross-scale fusion) | ✅ Done | HF parity exact |
 | Hybrid encoder (proj + AIFI + CCFM) | ✅ Done | image → P3/N4/N5 vs HF ≤ 4.3e-6 |
-| Query selection (IoU-aware) | 🟨 Skeleton | `src/decoder/rtdetr_transformer.py` (Person B) |
-| Decoder + auxiliary heads | 🟨 Skeleton | `src/decoder/{deformable_attention,decoder,denoising}.py` (Person B) |
-| Hungarian matcher | 🟨 Skeleton | `src/matcher/hungarian.py` (Person B) |
-| Loss (VFL + L1 + GIoU) | 🟨 Skeleton | `src/losses/rtdetr_loss.py` (Person B) |
+| Query selection (IoU-aware) | ✅ Done | `src/decoder/rtdetr_transformer.py`; scores / boxes vs HF ≤ 1e-5, selection exact |
+| Decoder + auxiliary heads | ✅ Done | `src/decoder/{deformable_attention,decoder}.py`, HF parity ≤ 1e-4 |
+| Contrastive denoising | ✅ Done | `src/decoder/denoising.py`; bit-identical to HF under the same seed |
+| Hungarian matcher | ✅ Done | `src/matcher/hungarian.py`; identical matches to HF |
+| Loss (VFL + L1 + GIoU) | ✅ Done | `src/losses/rtdetr_loss.py`; final, auxiliary and denoising losses match HF ≤ 1e-5 |
 | Post-processing | 🟨 Skeleton | `src/postprocess.py` (shared) |
 | COCO data pipeline | 🟨 Skeleton | `src/data/` (shared) |
 | COCO eval (mAP) | 🟨 Skeleton | `src/eval/coco_eval.py`, `scripts/eval.py` (shared) |
-| Training loop | ⬜ Not planned | we load the authors' pretrained weights into our implementation |
+| Training loop | ⬜ Not planned | we load the authors' pretrained weights into our implementation (matcher, loss and denoising are ready if one is added) |
 | Speed benchmark (latency incl. NMS) vs YOLO | ⬜ Not started | core goal: RT-DETR vs YOLO |
 
 Use ⬜ Not started / 🟨 Skeleton or in progress / ✅ Done. Skeleton files contain signatures, shapes, hints and self-check numbers; they raise `NotImplementedError` until filled in.
@@ -53,13 +54,14 @@ Same input through our module and HF's, both in `eval()` with the PekingU weight
 | Hybrid encoder P3 / N4 / N5 (same C3–C5) | ≤ 4e-6 | ≤ 1.1e-5 |
 | image → our backbone → our encoder vs HF full forward | ≤ 3e-6 | ≤ 4.3e-6 |
 | our P3–P5 into HF's decoder: scores / boxes | 2.6e-6 / 6.4e-6 | 5.8e-7 / 7.0e-6 |
+| HF's P3–P5 into our query selection + decoder: selection / scores / boxes | 0.0 / 1.9e-6 / 8.6e-6 | 0.0 / 7.0e-7 / 2.6e-6 |
 
 Tolerance is 1e-4. See [`notebooks/03_hf_parity.ipynb`](notebooks/03_hf_parity.ipynb) and `pytest -m slow`.
 
-| Model | Params backbone + encoder (ours) | mAP (paper) | mAP (ours) |
-|---|---|---|---|
-| RT-DETR-R18 | 16.16 M | 46.5 | — (needs `scripts/eval.py`) |
-| RT-DETR-R50 | 35.42 M | 53.1 | — |
+| Model | Params backbone + encoder (ours) | Params full model (ours) | mAP (paper) | mAP (ours) |
+|---|---|---|---|---|
+| RT-DETR-R18 | 16.16 M | 20.17 M | 46.5 | — (needs `scripts/eval.py` on val2017) |
+| RT-DETR-R50 | 35.42 M | 42.89 M | 53.1 | — |
 
 ### Using the pretrained weights
 
@@ -76,6 +78,15 @@ encoder = HybridEncoder(**HF_CONFIGS[18]["encoder"]).eval()
 encoder.load_state_dict(encoder_state_dict(sd), strict=True)
 
 p3, n4, n5 = encoder(backbone(images))   # images: [B, 3, 640, 640] in [0, 1], no mean/std
+
+# query selection + decoder (R18 has 3 decoder layers, R50 has 6)
+from src.decoder.rtdetr_transformer import RTDetrTransformer
+from src.utils.hf_weights import decoder_state_dict
+
+decoder = RTDetrTransformer(num_decoder_layers=3).eval()
+decoder.load_state_dict(decoder_state_dict(sd), strict=True)
+
+out = decoder([p3, n4, n5])              # out["logits"] [B, 300, 80], out["pred_boxes"] [B, 300, 4] (cxcywh, 0..1)
 ```
 
 ## Setup
@@ -104,10 +115,10 @@ Download `val2017.zip` and `annotations_trainval2017.zip` from https://cocodatas
 ## Evaluation
 
 ```bash
-python scripts/eval.py --depth 18 --coco data/coco --mode ours   # skeleton for now, see the file's hints
+python scripts/eval.py --depth 18 --coco data/coco --mode full   # our whole model, no HF module runs
 ```
 
-`--mode hf` evaluates HF's model; `--mode ours` runs our backbone + encoder with HF's decoder (`encoder_outputs=`); `--mode full` will use Person B's decoder.
+`--mode hf` evaluates HF's model; `--mode ours` runs our backbone + encoder with HF's decoder (`encoder_outputs=`); `--mode full` runs our backbone, encoder, query selection and decoder (HF only supplies the weights).
 
 ## Repo Structure
 
@@ -115,9 +126,9 @@ python scripts/eval.py --depth 18 --coco data/coco --mode ours   # skeleton for 
 src/
 ├── backbone/     # PResNet (ResNet-vd) — done
 ├── encoder/      # position embedding, AIFI, CCFM, HybridEncoder — done
-├── decoder/      # query selection, deformable attention, decoder, denoising — skeleton (Person B)
-├── matcher/      # Hungarian matcher — skeleton (Person B)
-├── losses/       # VFL + L1 + GIoU — skeleton (Person B)
+├── decoder/      # query selection, deformable attention, decoder, denoising — done
+├── matcher/      # Hungarian matcher — done
+├── losses/       # VFL + L1 + GIoU (final, auxiliary, denoising) — done
 ├── data/         # COCO dataset + transforms — skeleton (shared)
 ├── eval/         # COCO mAP — skeleton (shared)
 ├── utils/        # hf_weights (HF key mapping) — done; box_ops — skeleton (shared)
