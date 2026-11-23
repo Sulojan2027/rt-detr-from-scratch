@@ -1,4 +1,4 @@
-"""Detections → COCO json results → mAP with pycocotools.  [SHARED — skeleton]
+"""Detections → COCO json results → mAP with pycocotools.  [SHARED]
 
 Flow:  post_process(threshold=0.0) per image  →  to_coco_detections  →  evaluate_coco  →  12 COCO stats.
 
@@ -13,6 +13,7 @@ Self-checks once written:
     - Our backbone + encoder inside HF's decoder (`encoder_outputs=`) → the same AP (to ~0.001).
 """
 
+from pycocotools.cocoeval import COCOeval
 from torch import Tensor
 
 
@@ -22,19 +23,30 @@ def to_coco_detections(
     label_to_cat_id: list[int],
 ) -> list[dict]:
     """Per-image post-processed results (xyxy pixel boxes, 0..79 labels) → flat list of COCO result dicts."""
-    # Hints:
-    # 1. zip(results, image_ids); for each box: x1, y1, x2, y2 = box.tolist()
-    # 2. "bbox": [x1, y1, x2 - x1, y2 - y1], "category_id": label_to_cat_id[int(label)], "score": float(score)
-    # 3. Plain Python floats / ints only — json + pycocotools choke on tensors.
-    raise NotImplementedError
+    detections = []
+    for result, image_id in zip(results, image_ids, strict=True):
+        for box, label, score in zip(result["boxes"].tolist(), result["labels"].tolist(), result["scores"].tolist()):
+            x1, y1, x2, y2 = box
+            detections.append(
+                {
+                    "image_id": int(image_id),
+                    "category_id": label_to_cat_id[label],
+                    "bbox": [x1, y1, x2 - x1, y2 - y1],
+                    "score": score,
+                }
+            )
+    return detections
 
 
 def evaluate_coco(coco_gt, detections: list[dict], image_ids: list[int] | None = None) -> list[float]:
     """Run COCOeval (bbox). Returns the 12 stats; stats[0] = AP@[.5:.95], stats[1] = AP50."""
-    # Hints:
-    # 1. from pycocotools.cocoeval import COCOeval
-    # 2. coco_dt = coco_gt.loadRes(detections)       (empty list crashes — guard it)
-    # 3. E = COCOeval(coco_gt, coco_dt, iouType="bbox")
-    # 4. If you only ran a subset: E.params.imgIds = image_ids   ← else missing images count as misses, AP drops.
-    # 5. E.evaluate(); E.accumulate(); E.summarize(); return list(E.stats)
-    raise NotImplementedError
+    if not detections:
+        raise ValueError("No detections to evaluate...")
+    coco_dt = coco_gt.loadRes(detections)
+    E = COCOeval(coco_gt, coco_dt, iouType="bbox")
+    if image_ids is not None:                 
+        E.params.imgIds = sorted(image_ids)
+    E.evaluate()
+    E.accumulate()
+    E.summarize()
+    return list(E.stats)

@@ -209,7 +209,7 @@ class PResNet(nn.Module):
                 ch_in,
                 width,
                 count=count,
-                stride=1 if i == 0 else 2,  # stage 0: the max pool already downsampled
+                stride=1 if i == 0 else 2,
                 act=act,
                 variant=variant,
             )
@@ -228,7 +228,7 @@ class PResNet(nn.Module):
             for i in range(min(freeze_at, num_stages)):
                 self._freeze_parameters(self.encoder["stages"][i])
         if freeze_norm:
-            freeze_batch_norm2d(self)  # root is not a BN → children replaced in place
+            freeze_batch_norm2d(self)
 
     @staticmethod
     def _freeze_parameters(module: nn.Module) -> None:
