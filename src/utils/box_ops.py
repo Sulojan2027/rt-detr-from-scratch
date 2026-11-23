@@ -48,23 +48,39 @@ def box_area(boxes: Tensor) -> Tensor:
 
 
 def box_iou(boxes1: Tensor, boxes2: Tensor) -> tuple[Tensor, Tensor]:
-    """Pairwise IoU. [N, 4], [M, 4] xyxy → (iou [N, M], union [N, M]).  [optional — training only: matcher / loss]"""
-    # Hints:
-    # 1. Broadcast: boxes1[:, None, :2] is [N, 1, 2], boxes2[None, :, :2] is [1, M, 2].
-    # 2. Intersection top-left = max of the two top-lefts; bottom-right = min of the two bottom-rights.
-    # 3. wh = (rb - lt).clamp(min=0)   ← no overlap must give 0, not a negative area.
-    # 4. union = area1[:, None] + area2[None, :] - inter. Return union too: GIoU needs it.
-    raise NotImplementedError
+    """Pairwise IoU. [N, 4], [M, 4] xyxy → (iou [N, M], union [N, M])."""
+    area1 = box_area(boxes1)
+    area2 = box_area(boxes2)
+
+    # Overlap rectangle of every pair: the larger top-left corner and the smaller bottom-right corner.
+    top_left = torch.max(boxes1[:, None, :2], boxes2[None, :, :2])  # [N, M, 2]
+    bottom_right = torch.min(boxes1[:, None, 2:], boxes2[None, :, 2:])  # [N, M, 2]
+
+    # Boxes that do not overlap would give a negative size, so clamp it to 0.
+    overlap_wh = (bottom_right - top_left).clamp(min=0)
+    intersection = overlap_wh[..., 0] * overlap_wh[..., 1]  # [N, M]
+
+    union = area1[:, None] + area2[None, :] - intersection
+    return intersection / union, union
 
 
 def generalized_box_iou(boxes1: Tensor, boxes2: Tensor) -> Tensor:
-    """Pairwise GIoU in [-1, 1]. [N, 4], [M, 4] xyxy → [N, M].  [optional — training only: matcher / loss]"""
-    # Hints:
-    # 1. iou, union = box_iou(boxes1, boxes2)
-    # 2. Enclosing box C: top-left = MIN of top-lefts, bottom-right = MAX of bottom-rights (opposite of step 2 above).
-    # 3. giou = iou - (area_C - union) / area_C
-    # 4. Optional guard (HF does it): raise if any box has x2 < x1 or y2 < y1 — catches cxcywh passed by mistake.
-    raise NotImplementedError
+    """Pairwise GIoU in [-1, 1]. [N, 4], [M, 4] xyxy → [N, M]."""
+    # A box with x2 < x1 usually means (cx, cy, w, h) was passed by mistake; fail loudly instead of giving nan.
+    for name, boxes in (("boxes1", boxes1), ("boxes2", boxes2)):
+        if not (boxes[:, 2:] >= boxes[:, :2]).all():
+            raise ValueError(f"{name} must be in (x1, y1, x2, y2) corner format with x2 >= x1 and y2 >= y1.")
+
+    iou, union = box_iou(boxes1, boxes2)
+
+    # Smallest box that contains both boxes: the opposite corners from the IoU overlap above.
+    top_left = torch.min(boxes1[:, None, :2], boxes2[None, :, :2])
+    bottom_right = torch.max(boxes1[:, None, 2:], boxes2[None, :, 2:])
+    enclosing_wh = (bottom_right - top_left).clamp(min=0)
+    enclosing_area = enclosing_wh[..., 0] * enclosing_wh[..., 1]
+
+    # GIoU = IoU minus the share of the enclosing box that is empty (neither box covers it).
+    return iou - (enclosing_area - union) / enclosing_area
 
 
 def inverse_sigmoid(x: Tensor, eps: float = 1e-5) -> Tensor:

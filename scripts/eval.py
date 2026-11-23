@@ -11,7 +11,8 @@ Modes:
     ours  — OUR backbone + encoder make [P3, N4, N5]; HF runs only query selection + decoder.
             HF's own backbone and encoder are never called (pixel_values=None, verified with forward hooks).
             Same AP as `hf` = our half of the paper is correct on real data.
-    full  — later, when Person B's `RTDetrTransformer` exists: no HF at all.
+    full  — OUR backbone + encoder + query selection + decoder (`RTDetrTransformer`). HF is only used to
+            download the pretrained weights; none of its modules run. Same AP as `hf` = the whole model is correct.
 """
 
 import argparse
@@ -29,10 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # repo root, s
 from src.backbone.presnet import PResNet  # noqa: E402
 from src.data.coco import CocoDetection, collate_fn  # noqa: E402
 from src.data.transforms import build_transforms  # noqa: E402
+from src.decoder.rtdetr_transformer import RTDetrTransformer  # noqa: E402
 from src.encoder.hybrid_encoder import HybridEncoder  # noqa: E402
 from src.eval.coco_eval import evaluate_coco, to_coco_detections  # noqa: E402
 from src.postprocess import post_process  # noqa: E402
-from src.utils.hf_weights import HF_CONFIGS, backbone_state_dict, encoder_state_dict  # noqa: E402
+from src.utils.hf_weights import HF_CONFIGS, backbone_state_dict, decoder_state_dict, encoder_state_dict  # noqa: E402
 
 STAT_NAMES = ["AP", "AP50", "AP75", "APs", "APm", "APl", "AR1", "AR10", "AR100", "ARs", "ARm", "ARl"]
 
@@ -64,10 +66,12 @@ def main() -> None:
 
     hf_model = RTDetrForObjectDetection.from_pretrained(f"PekingU/rtdetr_r{args.depth}vd").eval().to(device)
 
+    # Every mode gets a `forward(images) -> (logits [B, 300, 80], pred_boxes [B, 300, 4])`.
     if args.mode == "hf":
         def forward(x):
-            return hf_model(pixel_values=x)
-    elif args.mode == "ours":
+            out = hf_model(pixel_values=x)
+            return out.logits, out.pred_boxes
+    else:
         sd = hf_model.state_dict()
         backbone = PResNet(**HF_CONFIGS[args.depth]["backbone"])                 # our backbone
         backbone.load_state_dict(backbone_state_dict(sd), strict=True)
@@ -76,19 +80,28 @@ def main() -> None:
         encoder.load_state_dict(encoder_state_dict(sd), strict=True)
         encoder.eval().to(device)
 
-        def forward(x):
-            feats = encoder(backbone(x))                                         
-            return hf_model(pixel_values=None, inputs_embeds=feats[0], encoder_outputs=(feats,))
-    else:
-        raise NotImplementedError("--mode full needs Person B's RTDetrTransformer")
+        if args.mode == "ours":
+            def forward(x):
+                feats = encoder(backbone(x))
+                out = hf_model(pixel_values=None, inputs_embeds=feats[0], encoder_outputs=(feats,))
+                return out.logits, out.pred_boxes
+        else:
+            transformer = RTDetrTransformer(num_decoder_layers=hf_model.config.decoder_layers)   # our decoder
+            transformer.load_state_dict(decoder_state_dict(sd), strict=True)
+            transformer.eval().to(device)
+            del hf_model, sd                                                     # weights are copied, HF no longer needed
+
+            def forward(x):
+                out = transformer(encoder(backbone(x)))
+                return out["logits"], out["pred_boxes"]
 
     detections, ran_ids = [], []
     t0 = time.perf_counter()
     with torch.inference_mode():
         for images, targets in tqdm(dataloader, desc=f"R{args.depth} {args.mode}"):
-            out = forward(images.to(device))
+            logits, pred_boxes = forward(images.to(device))
             sizes = torch.stack([t["orig_size"] for t in targets]).to(device)
-            results = post_process(out.logits, out.pred_boxes, sizes, threshold=0.0)   # threshold 0 for mAP
+            results = post_process(logits, pred_boxes, sizes, threshold=0.0)   # threshold 0 for mAP
             ids = [t["image_id"] for t in targets]
             detections += to_coco_detections(results, ids, dataset.cat_ids)
             ran_ids += ids
@@ -113,7 +126,7 @@ def main() -> None:
             **metrics,
         }
         out_path.write_text(json.dumps(record, indent=2))
-        print(f"saved → {out_path}")
+        print(f"saved -> {out_path}")
 
 
 if __name__ == "__main__":

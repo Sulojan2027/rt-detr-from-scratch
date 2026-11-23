@@ -43,8 +43,10 @@ class SelfAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, hidden_size)
         self.o_proj = nn.Linear(hidden_size, hidden_size)
         
-    def forward(self, x: Tensor, pos: Tensor | None = None) -> Tensor:
+    def forward(self, x: Tensor, pos: Tensor | None = None, attn_mask: Tensor | None = None) -> Tensor:
         # x: [B, N, D], pos: [1, N, D] or None → [B, N, D]
+        # attn_mask (optional, used by the decoder's denoising queries): additive [N, N] or [B, 1, N, N],
+        # 0 = may attend, -inf = blocked.
         qk = x if pos is None else x + pos
         q = self.q_proj(qk)
         k = self.k_proj(qk)
@@ -58,6 +60,8 @@ class SelfAttention(nn.Module):
         # Score
         scores = torch.matmul(q, k.transpose(-2, -1))
         scaled_scores = scores * self.scaling
+        if attn_mask is not None:
+            scaled_scores = scaled_scores + attn_mask
         attn_weights = scaled_scores.softmax(dim=-1)
 
         # Attention

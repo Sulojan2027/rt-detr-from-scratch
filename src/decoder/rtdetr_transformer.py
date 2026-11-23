@@ -1,4 +1,4 @@
-"""Query selection + decoder: encoder features [P3, N4, N5] → 300 detections.  [PERSON B — skeleton]
+"""Query selection + decoder: encoder features [P3, N4, N5] → 300 detections.
 
 Paper: RT-DETR §4.2 (uncertainty-minimal / IoU-aware query selection), §4.3 (decoder).
 HF reference: `RTDetrModel.__init__` / `RTDetrModel.forward` from "sources = []" onwards, and `generate_anchors`.
@@ -28,8 +28,11 @@ Parity self-check (the goal, like Person A's Tasks 18 / 20), in eval mode:
             res["pred_boxes"]       vs out.pred_boxes           [1, 300, 4]     max diff < 1e-4
 """
 
-import torch.nn as nn
-from torch import Tensor
+import torch
+from torch import Tensor, nn
+
+from src.decoder.decoder import Decoder, MLPPredictionHead
+from src.decoder.denoising import get_contrastive_denoising_training_group
 
 
 def generate_anchors(
@@ -39,13 +42,32 @@ def generate_anchors(
     dtype=None,
 ) -> tuple[Tensor, Tensor]:
     """One anchor box per encoder token → (anchors_unact [1, S, 4] logit space, valid_mask [1, S, 1])."""
-    # Hints (HF RTDetrModel._cached_generate_anchors):
-    # 1. Per level l with (H, W): meshgrid(arange(H), arange(W), indexing="ij") → centre x = (j + 0.5) / W,
-    #    y = (i + 0.5) / H; box size w = h = grid_size * 2**l  (0.05 at stride 8, 0.1 at 16, 0.2 at 32).
-    # 2. Concatenate levels → [1, S, 4] as (cx, cy, w, h), S = 6400 + 1600 + 400 = 8400 at 640².
-    # 3. valid_mask = all 4 coords in (0.01, 0.99). Anchors at the border are invalid.
-    # 4. anchors = log(a / (1 - a)); invalid → torch.finfo(dtype).max (so they never win top-k after adding offsets).
-    raise NotImplementedError
+    dtype = dtype or torch.float32
+
+    anchors = []
+    for level, (height, width) in enumerate(spatial_shapes):
+        ys, xs = torch.meshgrid(
+            torch.arange(height, device=device, dtype=dtype),
+            torch.arange(width, device=device, dtype=dtype),
+            indexing="ij",
+        )
+        # centre of every cell, as a fraction of the image
+        cx = (xs + 0.5) / width
+        cy = (ys + 0.5) / height
+        # the box gets twice as big on every coarser level: 0.05, 0.1, 0.2
+        size = torch.full_like(cx, grid_size * 2.0**level)
+        level_anchors = torch.stack([cx, cy, size, size], dim=-1)  # [H, W, 4]
+        anchors.append(level_anchors.reshape(1, height * width, 4))
+    anchors = torch.cat(anchors, dim=1)  # [1, S, 4] as (cx, cy, w, h)
+
+    # Anchors touching the image border are not useful, so they are marked invalid.
+    eps = 1e-2
+    valid_mask = ((anchors > eps) & (anchors < 1 - eps)).all(dim=-1, keepdim=True)  # [1, S, 1]
+
+    # To logit space. Invalid anchors get the largest float, so they can never win the top-k later.
+    anchors = torch.log(anchors / (1 - anchors))
+    anchors = torch.where(valid_mask, anchors, torch.full_like(anchors, torch.finfo(dtype).max))
+    return anchors, valid_mask
 
 
 class RTDetrTransformer(nn.Module):
@@ -66,32 +88,95 @@ class RTDetrTransformer(nn.Module):
         box_noise_scale: float = 1.0,
     ) -> None:
         super().__init__()
-        # Hints:
-        # 1. Build every attribute in the module docstring with EXACTLY those names (strict load decides).
-        # 2. decoder_input_proj: same pattern as Person A's encoder_input_proj (Conv2d 1×1 no bias + BatchNorm2d).
-        # 3. self.decoder = Decoder(hidden_dim, num_decoder_layers, num_classes, num_heads, ffn_dim, num_levels, n_points)
-        # 4. Don't hard-code R18's 3 layers — R50 has 6 (hf.config.decoder_layers).
-        raise NotImplementedError
+        self.hidden_dim = hidden_dim
+        self.num_classes = num_classes
+        self.num_queries = num_queries
+        self.num_denoising = num_denoising
+        self.label_noise_ratio = label_noise_ratio
+        self.box_noise_scale = box_noise_scale
+
+        # Project each encoder output (already 256 channels) with 1×1 conv + BatchNorm.
+        self.decoder_input_proj = nn.ModuleList(
+            nn.Sequential(
+                nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+            )
+            for _ in range(num_levels)
+        )
+
+        # Query selection heads: score and box for every encoder token.
+        self.enc_output = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim))
+        self.enc_score_head = nn.Linear(hidden_dim, num_classes)
+        self.enc_bbox_head = MLPPredictionHead(hidden_dim, hidden_dim, 4, num_layers=3)
+
+        # Embedding for the (noisy) ground-truth labels used by denoising training; the last index is padding.
+        self.denoising_class_embed = nn.Embedding(num_classes + 1, hidden_dim, padding_idx=num_classes)
+
+        self.decoder = Decoder(hidden_dim, num_decoder_layers, num_classes, num_heads, ffn_dim, num_levels, n_points)
 
     def forward(self, feats: list[Tensor], targets: list[dict] | None = None) -> dict:
-        # Hints (HF RTDetrModel.forward after the encoder):
-        # 1. sources = [proj(f) for proj, f in zip(self.decoder_input_proj, feats)]
-        #    spatial_shapes = [(H, W) per level]; memory = cat([s.flatten(2).transpose(1, 2)], dim=1)   → [B, S, 256]
-        # 2. anchors, valid_mask = generate_anchors(spatial_shapes, device=..., dtype=...)
-        # 3. Query selection:
-        #       output_memory = self.enc_output(valid_mask * memory)
-        #       enc_outputs_class = self.enc_score_head(output_memory)                  [B, S, 80]
-        #       enc_coord_unact   = self.enc_bbox_head(output_memory) + anchors         [B, S, 4]
-        #       topk_ind = enc_outputs_class.max(-1).values.topk(num_queries, dim=1).indices      [B, 300]
-        #    gather (dim=1) with topk_ind: ref_unact, enc_topk_logits, target = output_memory[topk].detach()
-        #    "IoU-aware" part of the paper is in TRAINING: the VFL loss teaches enc_score_head to score ≈ IoU,
-        #    so top-k by class score also picks well-localised boxes. Inference is plain top-k.
-        # 4. Training + targets: dn_class, dn_bbox_unact, attn_mask, dn_meta = get_contrastive_denoising_training_group(...)
-        #    → prepend: target = cat([dn_class, target], 1), ref_unact = cat([dn_bbox_unact, ref_unact], 1).
-        # 5. logits, boxes = self.decoder(target, ref_unact.detach(), memory, spatial_shapes, attn_mask)
-        #    Gotcha: the decoder attends to `memory` (UNmasked), the enc_* heads use valid_mask * memory. HF does this.
-        # 6. Training: split off the denoising part with dn_meta["dn_num_split"] before building outputs.
-        # 7. Return {"logits": logits[:, -1], "pred_boxes": boxes[:, -1],
-        #            "aux_outputs": [{"logits", "pred_boxes"} for each earlier layer] + [enc_topk_logits / sigmoid(ref)],
-        #            "dn_outputs": [...], "dn_meta": dn_meta, "enc_outputs_class": enc_outputs_class}
-        raise NotImplementedError
+        # 1. Project the three feature maps and flatten them into one token sequence [B, S, 256].
+        sources = [proj(f) for proj, f in zip(self.decoder_input_proj, feats)]
+        spatial_shapes = [tuple(s.shape[-2:]) for s in sources]
+        memory = torch.cat([s.flatten(2).transpose(1, 2) for s in sources], dim=1)
+
+        # 2. One anchor box for every token.
+        anchors, valid_mask = generate_anchors(spatial_shapes, device=memory.device, dtype=memory.dtype)
+
+        # 3. Query selection: score every token, keep the best `num_queries`.
+        #    Tokens whose anchor is invalid are zeroed before the heads (the decoder still sees the full memory).
+        output_memory = self.enc_output(valid_mask.to(memory.dtype) * memory)
+        enc_outputs_class = self.enc_score_head(output_memory)  # [B, S, C]
+        enc_outputs_coord = self.enc_bbox_head(output_memory) + anchors  # [B, S, 4] logit space
+
+        topk_ind = enc_outputs_class.max(dim=-1).values.topk(self.num_queries, dim=1).indices  # [B, Q]
+
+        def pick(x: Tensor) -> Tensor:
+            return x.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+
+        ref_unact = pick(enc_outputs_coord)  # starting boxes
+        enc_topk_logits = pick(enc_outputs_class)
+        target = pick(output_memory).detach()  # starting query content
+
+        # 4. Training with ground truth: add noisy copies of the GT as extra queries in front of the normal ones.
+        attn_mask, dn_meta = None, None
+        if self.training and targets is not None:
+            dn_class, dn_boxes_unact, attn_mask, dn_meta = get_contrastive_denoising_training_group(
+                targets,
+                self.num_classes,
+                self.num_queries,
+                self.denoising_class_embed,
+                self.num_denoising,
+                self.label_noise_ratio,
+                self.box_noise_scale,
+            )
+            if dn_meta is not None:  # (None when the batch has no GT boxes at all)
+                target = torch.cat([dn_class, target], dim=1)
+                ref_unact = torch.cat([dn_boxes_unact, ref_unact], dim=1)
+
+        # 5. Decoder. Reference boxes are detached: gradients reach them through the encoder heads' own loss.
+        logits, boxes = self.decoder(target, ref_unact.detach(), memory, spatial_shapes, attn_mask)
+
+        # 6. Split the denoising queries off again, so the normal outputs look the same as at inference.
+        dn_outputs = None
+        if dn_meta is not None:
+            num_dn = dn_meta["dn_num_split"][0]
+            dn_logits, logits = logits[:, :, :num_dn], logits[:, :, num_dn:]
+            dn_boxes, boxes = boxes[:, :, :num_dn], boxes[:, :, num_dn:]
+            dn_outputs = [{"logits": dn_logits[:, i], "pred_boxes": dn_boxes[:, i]} for i in range(dn_logits.shape[1])]
+            ref_unact = ref_unact[:, num_dn:]  # the encoder top-k boxes, without the denoising ones
+
+        # Earlier decoder layers and the encoder top-k predictions feed the auxiliary losses.
+        aux_outputs = [{"logits": logits[:, i], "pred_boxes": boxes[:, i]} for i in range(logits.shape[1] - 1)]
+        aux_outputs.append({"logits": enc_topk_logits, "pred_boxes": ref_unact.sigmoid()})
+
+        out = {
+            "logits": logits[:, -1],
+            "pred_boxes": boxes[:, -1],
+            "aux_outputs": aux_outputs,
+            "enc_outputs_class": enc_outputs_class,
+        }
+        if dn_meta is not None:
+            out["dn_outputs"] = dn_outputs
+            out["dn_meta"] = dn_meta
+        return out
