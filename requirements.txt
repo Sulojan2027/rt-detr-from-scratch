@@ -1,3 +1,4 @@
+# Install PyTorch first with the CUDA build that matches the GPU driver (https://pytorch.org), then: pip install -r requirements.txt
 torch>=2.1.0
 torchvision>=0.16.0
 numpy>=1.24.0
@@ -5,14 +6,22 @@ opencv-python>=4.8.0
 pycocotools>=2.0.7
 scipy>=1.11.0
 pyyaml>=6.0
-tensorboard>=2.15.0
 tqdm>=4.66.0
 matplotlib>=3.8.0
-onnx>=1.15.0
-onnxruntime>=1.16.0
-ruff>=0.1.0
-pytest>=7.4.0
+pillow>=10.1          # ImageFont.load_default(size=...) in scripts/visualize.py
 
-# dev/test only: HF reference weights + parity tests (keys dumped with transformers 5.15.0.dev0)
+# Pretrained weights: RTDETR.from_hf downloads the authors' checkpoints through transformers
 transformers>=5.0
 safetensors>=0.4
+
+# YOLOv8 baselines
+ultralytics>=8.3
+
+# ONNX / TensorRT (export + speed benchmark; TensorRT needs an NVIDIA GPU, CUDA 12)
+onnx>=1.15.0
+onnxslim>=0.1.40
+tensorrt-cu12>=10.6
+
+# dev
+ruff>=0.1.0
+pytest>=7.4.0

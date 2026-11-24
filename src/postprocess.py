@@ -1,4 +1,4 @@
-"""Model outputs → final detections per image.  [SHARED]
+"""Model outputs → final detections per image.
 
 RT-DETR needs **no NMS**: the Hungarian matcher trains each object to one query, so post-processing is only
 "score, pick top-k, convert boxes".

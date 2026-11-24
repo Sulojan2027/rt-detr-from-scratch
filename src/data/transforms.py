@@ -1,4 +1,4 @@
-"""Eval-time image + target transforms (no training augmentations — we use pretrained weights).  [SHARED]
+"""Eval-time image + target transforms (no training augmentations — we use pretrained weights).
 
 Every transform takes and returns `(image, target)` so boxes stay in sync with the image.
 

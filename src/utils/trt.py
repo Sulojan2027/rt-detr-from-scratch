@@ -1,4 +1,4 @@
-"""Minimal TensorRT helpers: ONNX → engine, and run an engine on torch CUDA tensors.  [SHARED — Step 1]
+"""Minimal TensorRT helpers: ONNX → engine, and run an engine on torch CUDA tensors.
 
 Big picture (see the explanation in the chat / docs):
     model.onnx  ──(1) build_engine──▶  model.engine  ──(2) TRTModule──▶  outputs

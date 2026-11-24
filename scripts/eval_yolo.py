@@ -1,20 +1,4 @@
-"""COCO val2017 mAP for YOLO (ultralytics) with the SAME metric code as RT-DETR.  [SHARED]
-
-Usage:
-    python scripts/eval_yolo.py --model yolov8s --limit 200                       # quick subset
-    python scripts/eval_yolo.py --model yolov8l --out results/yolov8l.json        # full val2017 (on the 3090)
-    python scripts/eval_yolo.py --model yolov8l --conf 0.05 --out results/yolov8l_conf0.05.json   # NMS analysis
-
-Fair comparison with scripts/eval.py:
-    - same images (CocoDetection), same detections → COCO json conversion (`to_coco_detections`),
-      same COCOeval call (`evaluate_coco`), same 12 numbers.
-    - YOLO keeps its own preprocessing (letterbox to 640) and its own NMS — both are part of its design.
-    - conf=0.001, iou=0.7, max_det=300 are ultralytics' official validation settings (and the paper's Table 1 best-AP row).
-
-Paper baselines (RT-DETR arXiv v3): main Table 2 compares RT-DETR-R50 with YOLOv8-L/X (+ v5/v6/v7/PPYOLOE);
-appendix Table B compares RT-DETR-R18 with YOLOv8-S/M; the NMS analysis (Table 1) uses YOLOv8.
-Official YOLOv8 COCO val AP: s 44.9, m 50.2, l 52.9, x 53.9.
-"""
+"""COCO val2017 AP for YOLOv8 (ultralytics), with the same metric code as scripts/eval.py."""
 
 import argparse
 import json

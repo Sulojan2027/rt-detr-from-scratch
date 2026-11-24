@@ -1,4 +1,4 @@
-"""Box helpers shared by query selection, denoising, matcher, losses and post-processing.  [SHARED]
+"""Box helpers shared by query selection, denoising, matcher, losses and post-processing.
 
 Conventions (same as HF):
 - Boxes are **normalised** to [0, 1] by image width / height.

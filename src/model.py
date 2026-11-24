@@ -1,4 +1,4 @@
-"""The whole RT-DETR, built only from our modules, and its deploy wrapper for ONNX / TensorRT.  [SHARED — Step 2]
+"""The whole RT-DETR, built only from our modules, and its deploy wrapper for ONNX / TensorRT.
 
     image [B, 3, 640, 640]
       → PResNet (Person A)          → [C3, C4, C5]

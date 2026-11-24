@@ -1,27 +1,5 @@
-"""Speed + size benchmark, RT-DETR vs YOLO: params, GFLOPs, latency (batch 1), end-to-end incl. NMS.  [SHARED]
-
-Usage:
-    python scripts/benchmark.py --model rtdetr_r18                             # our whole model, FP16 (default)
-    python scripts/benchmark.py --model rtdetr_r50
-    python scripts/benchmark.py --model rtdetr_r18 --mode hf                   # HF's model, for reference
-    python scripts/benchmark.py --model yolov8l                                # model + NMS, + NMS threshold sweep
-    python scripts/benchmark.py --model yolov8s --no-fp16                      # FP32
-    python scripts/benchmark.py --engine engines/rtdetr_r18_ours_fp16.engine   # TensorRT engine (scripts/export_trt.py)
-    python scripts/benchmark.py --engine engines/yolov8l_conf0.001_iou0.7_fp16.engine   # YOLO + EfficientNMS plugin
-
-What is measured (batch 1, 640×640, like the paper), on ONE real COCO image (NMS cost depends on content):
-    params / gflops   size of the network (torch FlopCounterMode, conv/matmul; 1 multiply-add = 2 FLOPs)
-    model_ms          median latency of the network forward
-    post_ms           RT-DETR: sigmoid + top-k (no NMS)      YOLO: NMS at --conf / --iou
-    e2e_ms / fps      model + post — the number the paper's FPS column is about
-    nms_sweep (YOLO)  boxes entering NMS + NMS ms for conf 0.001 / 0.01 / 0.05 / 0.25, averaged over
-                      --sweep-images real val2017 images (paper §3, Fig. 2 / Table 1 — NMS cost depends on content)
-
-Fairness notes:
-    - same timer, same image, same FP16 autocast, batch 1, cudnn.benchmark for both families.
-    - YOLO is Conv+BN-fused (as ultralytics deploys it); our RT-DETR is NOT fused → conservative for RT-DETR.
-    - Paper: T4 + TensorRT FP16 + EfficientNMS plugin. Here: PyTorch on your GPU. Compare models on the SAME GPU.
-"""
+"""Speed and size of RT-DETR vs YOLOv8: params, GFLOPs, batch-1 latency incl. post-processing / NMS.
+Runs the PyTorch model (`--model`) or a TensorRT engine from scripts/export_trt.py (`--engine`)."""
 
 import argparse
 import json

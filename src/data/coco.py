@@ -1,4 +1,4 @@
-"""COCO 2017 detection dataset.  [SHARED]
+"""COCO 2017 detection dataset.
 
 Layout (README "Data"):
     data/coco/annotations/instances_val2017.json

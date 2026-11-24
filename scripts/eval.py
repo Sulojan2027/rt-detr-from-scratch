@@ -1,19 +1,5 @@
-"""COCO val2017 mAP for RT-DETR.  [SHARED]
-
-Usage:
-    python scripts/eval.py --depth 18 --mode hf                       # HF model end to end (reference AP)
-    python scripts/eval.py --depth 18 --mode ours                     # our PResNet + HybridEncoder → HF decoder
-    python scripts/eval.py --depth 18 --mode ours --limit 200         # quick subset
-    python scripts/eval.py --depth 50 --mode ours --coco /data/coco --out results/r50_ours.json   # on the 3090
-
-Modes:
-    hf    — `RTDetrForObjectDetection` alone. Gives the reference AP (paper: R18 46.5, R50 53.1).
-    ours  — OUR backbone + encoder make [P3, N4, N5]; HF runs only query selection + decoder.
-            HF's own backbone and encoder are never called (pixel_values=None, verified with forward hooks).
-            Same AP as `hf` = our half of the paper is correct on real data.
-    full  — OUR backbone + encoder + query selection + decoder (`RTDetrTransformer`). HF is only used to
-            download the pretrained weights; none of its modules run. Same AP as `hf` = the whole model is correct.
-"""
+"""COCO val2017 AP for RT-DETR: `--mode full` = our whole model, `ours` = our backbone + encoder with HF's decoder,
+`hf` = HF's model (reference)."""
 
 import argparse
 import json

@@ -1,4 +1,4 @@
-"""Detections → COCO json results → mAP with pycocotools.  [SHARED]
+"""Detections → COCO json results → mAP with pycocotools.
 
 Flow:  post_process(threshold=0.0) per image  →  to_coco_detections  →  evaluate_coco  →  12 COCO stats.
 
