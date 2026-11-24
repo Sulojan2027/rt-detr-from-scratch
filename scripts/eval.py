@@ -30,11 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # repo root, s
 from src.backbone.presnet import PResNet  # noqa: E402
 from src.data.coco import CocoDetection, collate_fn  # noqa: E402
 from src.data.transforms import build_transforms  # noqa: E402
-from src.decoder.rtdetr_transformer import RTDetrTransformer  # noqa: E402
 from src.encoder.hybrid_encoder import HybridEncoder  # noqa: E402
 from src.eval.coco_eval import evaluate_coco, to_coco_detections  # noqa: E402
+from src.model import RTDETR  # noqa: E402
 from src.postprocess import post_process  # noqa: E402
-from src.utils.hf_weights import HF_CONFIGS, backbone_state_dict, decoder_state_dict, encoder_state_dict  # noqa: E402
+from src.utils.hf_weights import HF_CONFIGS, backbone_state_dict, encoder_state_dict  # noqa: E402
 
 STAT_NAMES = ["AP", "AP50", "AP75", "APs", "APm", "APl", "AR1", "AR10", "AR100", "ARs", "ARm", "ARl"]
 
@@ -64,36 +64,32 @@ def main() -> None:
     data = Subset(dataset, range(args.limit)) if args.limit is not None else dataset   # dataset keeps .coco/.cat_ids
     dataloader = DataLoader(data, args.batch_size, collate_fn=collate_fn, num_workers=args.workers)
 
-    hf_model = RTDetrForObjectDetection.from_pretrained(f"PekingU/rtdetr_r{args.depth}vd").eval().to(device)
-
     # Every mode gets a `forward(images) -> (logits [B, 300, 80], pred_boxes [B, 300, 4])`.
-    if args.mode == "hf":
-        def forward(x):
-            out = hf_model(pixel_values=x)
-            return out.logits, out.pred_boxes
-    else:
-        sd = hf_model.state_dict()
-        backbone = PResNet(**HF_CONFIGS[args.depth]["backbone"])                 # our backbone
-        backbone.load_state_dict(backbone_state_dict(sd), strict=True)
-        backbone.eval().to(device)
-        encoder = HybridEncoder(**HF_CONFIGS[args.depth]["encoder"])             # our encoder
-        encoder.load_state_dict(encoder_state_dict(sd), strict=True)
-        encoder.eval().to(device)
+    if args.mode == "full":
+        model = RTDETR.from_hf(args.depth).to(device)                    # our whole model; HF only supplied weights
 
-        if args.mode == "ours":
+        def forward(x):
+            out = model(x)
+            return out["logits"], out["pred_boxes"]
+    else:
+        hf_model = RTDetrForObjectDetection.from_pretrained(f"PekingU/rtdetr_r{args.depth}vd").eval().to(device)
+        if args.mode == "hf":
+            def forward(x):
+                out = hf_model(pixel_values=x)
+                return out.logits, out.pred_boxes
+        else:
+            sd = hf_model.state_dict()
+            backbone = PResNet(**HF_CONFIGS[args.depth]["backbone"])             # our backbone
+            backbone.load_state_dict(backbone_state_dict(sd), strict=True)
+            backbone.eval().to(device)
+            encoder = HybridEncoder(**HF_CONFIGS[args.depth]["encoder"])         # our encoder
+            encoder.load_state_dict(encoder_state_dict(sd), strict=True)
+            encoder.eval().to(device)
+
             def forward(x):
                 feats = encoder(backbone(x))
                 out = hf_model(pixel_values=None, inputs_embeds=feats[0], encoder_outputs=(feats,))
                 return out.logits, out.pred_boxes
-        else:
-            transformer = RTDetrTransformer(num_decoder_layers=hf_model.config.decoder_layers)   # our decoder
-            transformer.load_state_dict(decoder_state_dict(sd), strict=True)
-            transformer.eval().to(device)
-            del hf_model, sd                                                     # weights are copied, HF no longer needed
-
-            def forward(x):
-                out = transformer(encoder(backbone(x)))
-                return out["logits"], out["pred_boxes"]
 
     detections, ran_ids = [], []
     t0 = time.perf_counter()

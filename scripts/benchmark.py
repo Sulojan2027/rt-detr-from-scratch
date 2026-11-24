@@ -1,8 +1,9 @@
 """Speed + size benchmark, RT-DETR vs YOLO: params, GFLOPs, latency (batch 1), end-to-end incl. NMS.  [SHARED]
 
 Usage:
-    python scripts/benchmark.py --model rtdetr_r18 --mode ours                 # FP16 on the GPU (default)
-    python scripts/benchmark.py --model rtdetr_r50 --mode ours
+    python scripts/benchmark.py --model rtdetr_r18                             # our whole model, FP16 (default)
+    python scripts/benchmark.py --model rtdetr_r50
+    python scripts/benchmark.py --model rtdetr_r18 --mode hf                   # HF's model, for reference
     python scripts/benchmark.py --model yolov8l                                # model + NMS, + NMS threshold sweep
     python scripts/benchmark.py --model yolov8s --no-fp16                      # FP32
     python scripts/benchmark.py --engine engines/rtdetr_r18_ours_fp16.engine   # TensorRT engine (scripts/export_trt.py)
@@ -37,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # repo root, s
 from src.backbone.presnet import PResNet  # noqa: E402
 from src.data.transforms import build_transforms  # noqa: E402
 from src.encoder.hybrid_encoder import HybridEncoder  # noqa: E402
+from src.model import RTDETR  # noqa: E402
 from src.postprocess import post_process  # noqa: E402
 from src.utils.hf_weights import HF_CONFIGS, backbone_state_dict, encoder_state_dict  # noqa: E402
 
@@ -92,35 +94,47 @@ def load_image(path: str | None, size: int, letterbox: bool, device: str) -> tor
 
 
 def build_rtdetr(model: str, mode: str, device: str):
-    """→ (model_fn, post_fn(out), params_M). Same `ours` path as scripts/eval.py."""
-    from transformers import RTDetrForObjectDetection
-
+    """→ (model_fn(x) -> (logits, pred_boxes), post_fn(out, size), params_M). Same modes as scripts/eval.py."""
     depth = int(model.split("_r")[1])
-    hf = RTDetrForObjectDetection.from_pretrained(f"PekingU/rtdetr_r{depth}vd").eval().to(device)
-    if mode == "hf":
-        def model_fn(x):
-            return hf(pixel_values=x)
+    if mode == "full":
+        net = RTDETR.from_hf(depth).to(device)                           # our whole model
 
-        params = count_params(hf)
+        def model_fn(x):
+            out = net(x)
+            return out["logits"], out["pred_boxes"]
+
+        params = count_params(net)
     else:
-        sd = hf.state_dict()
-        backbone = PResNet(**HF_CONFIGS[depth]["backbone"])
-        backbone.load_state_dict(backbone_state_dict(sd), strict=True)
-        encoder = HybridEncoder(**HF_CONFIGS[depth]["encoder"])
-        encoder.load_state_dict(encoder_state_dict(sd), strict=True)
-        backbone.eval().to(device)
-        encoder.eval().to(device)
+        from transformers import RTDetrForObjectDetection
 
-        def model_fn(x):
-            feats = encoder(backbone(x))
-            return hf(pixel_values=None, inputs_embeds=feats[0], encoder_outputs=(feats,))   # HF backbone/encoder skipped
+        hf = RTDetrForObjectDetection.from_pretrained(f"PekingU/rtdetr_r{depth}vd").eval().to(device)
+        if mode == "hf":
+            def model_fn(x):
+                out = hf(pixel_values=x)
+                return out.logits, out.pred_boxes
 
-        # what actually runs: our backbone + encoder + HF's query selection / decoder
-        params = count_params(backbone) + count_params(encoder) + sum(count_params(getattr(hf.model, n)) for n in DECODER_SIDE)
+            params = count_params(hf)
+        else:
+            sd = hf.state_dict()
+            backbone = PResNet(**HF_CONFIGS[depth]["backbone"])
+            backbone.load_state_dict(backbone_state_dict(sd), strict=True)
+            encoder = HybridEncoder(**HF_CONFIGS[depth]["encoder"])
+            encoder.load_state_dict(encoder_state_dict(sd), strict=True)
+            backbone.eval().to(device)
+            encoder.eval().to(device)
+
+            def model_fn(x):
+                feats = encoder(backbone(x))
+                out = hf(pixel_values=None, inputs_embeds=feats[0], encoder_outputs=(feats,))   # HF backbone/encoder skipped
+                return out.logits, out.pred_boxes
+
+            # what actually runs: our backbone + encoder + HF's query selection / decoder
+            params = count_params(backbone) + count_params(encoder) + sum(count_params(getattr(hf.model, n)) for n in DECODER_SIDE)
 
     def post_fn(out, size):
-        sizes = torch.tensor([[size, size]], device=out.logits.device)
-        return post_process(out.logits, out.pred_boxes, sizes, threshold=0.5)
+        logits, pred_boxes = out
+        sizes = torch.tensor([[size, size]], device=logits.device)
+        return post_process(logits, pred_boxes, sizes, threshold=0.5)
 
     return model_fn, post_fn, params
 
@@ -149,7 +163,8 @@ def build_yolo(model: str, device: str, weights_dir: str, conf: float, iou: floa
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default="rtdetr_r18", help="rtdetr_r18 | rtdetr_r50 | yolov8s | yolov8m | yolov8l | yolov8x")
-    p.add_argument("--mode", default="ours", choices=["hf", "ours"], help="RT-DETR only")
+    p.add_argument("--mode", default="full", choices=["full", "ours", "hf"],
+                   help="RT-DETR only: full = our whole model, ours = our backbone+encoder + HF decoder, hf = HF")
     p.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True, help="--no-fp16 for FP32")
     p.add_argument("--size", type=int, default=640)
     p.add_argument("--image", default=DEFAULT_IMAGE, help="real COCO image used as input")

@@ -5,8 +5,16 @@ from torch import Tensor
 BACKBONE_PREFIX = "model.backbone.model."
 ENCODER_PREFIXES = ("model.encoder_input_proj.", "model.encoder.")
 HF_CONFIGS: dict[int, dict[str, dict]] = {
-    18: {"backbone": dict(depth=18), "encoder": dict(in_channels=(128, 256, 512), expansion=0.5)},
-    50: {"backbone": dict(depth=50), "encoder": dict(in_channels=(512, 1024, 2048), expansion=1.0)},
+    18: {
+        "backbone": dict(depth=18),
+        "encoder": dict(in_channels=(128, 256, 512), expansion=0.5),
+        "decoder": dict(num_decoder_layers=3),
+    },
+    50: {
+        "backbone": dict(depth=50),
+        "encoder": dict(in_channels=(512, 1024, 2048), expansion=1.0),
+        "decoder": dict(num_decoder_layers=6),
+    },
 }
 
 
