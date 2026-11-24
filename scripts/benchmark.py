@@ -5,6 +5,8 @@ Usage:
     python scripts/benchmark.py --model rtdetr_r50 --mode ours
     python scripts/benchmark.py --model yolov8l                                # model + NMS, + NMS threshold sweep
     python scripts/benchmark.py --model yolov8s --no-fp16                      # FP32
+    python scripts/benchmark.py --engine engines/rtdetr_r18_ours_fp16.engine   # TensorRT engine (scripts/export_trt.py)
+    python scripts/benchmark.py --engine engines/yolov8l_conf0.001_iou0.7_fp16.engine   # YOLO + EfficientNMS plugin
 
 What is measured (batch 1, 640×640, like the paper), on ONE real COCO image (NMS cost depends on content):
     params / gflops   size of the network (torch FlopCounterMode, conv/matmul; 1 multiply-add = 2 FLOPs)
@@ -160,14 +162,44 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warmup", type=int, default=50)
     p.add_argument("--iters", type=int, default=200)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--engine", default=None, help="time a TensorRT engine from scripts/export_trt.py instead")
     p.add_argument("--out", default=None, help="JSON path; default results/speed_<model>[_<mode>].json")
     return p.parse_args()
+
+
+def bench_engine(args) -> dict:
+    """End-to-end latency of a TensorRT engine (RT-DETR: incl. top-k; YOLO: incl. EfficientNMS plugin)."""
+    from src.utils.trt import TRTModule
+
+    engine_path = Path(args.engine)
+    engine = TRTModule(engine_path)
+    is_rtdetr = "orig_sizes" in engine.input_names
+    x = load_image(args.image, args.size, letterbox=not is_rtdetr, device="cuda")
+    inputs = (x, torch.tensor([[args.size, args.size]], device="cuda")) if is_rtdetr else (x,)
+    t = time_fn(lambda _: engine(*inputs), x, args.warmup, args.iters)
+    record = {"engine": str(engine_path), "backend": "tensorrt",
+              "device": torch.cuda.get_device_name(), "input": [1, 3, args.size, args.size], "image": args.image,
+              "post": "sigmoid + top-k inside engine (no NMS)" if is_rtdetr else "EfficientNMS_TRT plugin inside engine",
+              "e2e_ms": t["median_ms"], "e2e_p90_ms": t["p90_ms"], "fps": round(1000 / t["median_ms"], 1)}
+    build_report = engine_path.with_suffix(".json")                     # written by export_trt.py
+    if build_report.exists():
+        record = {**json.loads(build_report.read_text()), **record}
+    return record
 
 
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
     torch.backends.cudnn.benchmark = True
+
+    if args.engine:
+        record = bench_engine(args)
+        print(json.dumps(record, indent=2))
+        out_path = Path(args.out or Path("results", f"speed_trt_{Path(args.engine).stem}.json"))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(record, indent=2))
+        print(f"saved → {out_path}")
+        return
     is_yolo = args.model.startswith("yolo")
 
     if is_yolo:

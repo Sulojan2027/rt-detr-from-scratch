@@ -28,14 +28,16 @@ from torch import Tensor
 from src.utils.box_ops import box_cxcywh_to_xyxy
 
 
-def post_process(
+def topk_detections(
     logits: Tensor,
     pred_boxes: Tensor,
     target_sizes: Tensor,
-    threshold: float = 0.5,
     num_top: int | None = None,
-) -> list[dict[str, Tensor]]:
-    """[B, Q, C] logits + [B, Q, 4] cxcywh boxes → per-image dicts of scores / labels / xyxy pixel boxes."""
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Tensor-only core (fixed-size outputs, ONNX/TensorRT-exportable).
+
+    [B, Q, C] logits + [B, Q, 4] cxcywh boxes + [B, 2] (h, w) → scores [B, K], labels [B, K], boxes [B, K, 4] xyxy pixels.
+    """
     boxes = box_cxcywh_to_xyxy(pred_boxes)
     img_h, img_w = target_sizes.unbind(1)
     scale = torch.stack([img_w, img_h, img_w, img_h], 1).to(boxes)      # sizes are (h, w), boxes are (x, y, x, y)
@@ -48,7 +50,18 @@ def post_process(
     labels = index % C
     query = index // C
     boxes = boxes.gather(1, query.unsqueeze(-1).repeat(1, 1, 4))
+    return scores, labels, boxes
 
+
+def post_process(
+    logits: Tensor,
+    pred_boxes: Tensor,
+    target_sizes: Tensor,
+    threshold: float = 0.5,
+    num_top: int | None = None,
+) -> list[dict[str, Tensor]]:
+    """[B, Q, C] logits + [B, Q, 4] cxcywh boxes → per-image dicts of scores / labels / xyxy pixel boxes."""
+    scores, labels, boxes = topk_detections(logits, pred_boxes, target_sizes, num_top)
     results = []
     for score, label, box in zip(scores, labels, boxes, strict=True):
         keep = score > threshold
