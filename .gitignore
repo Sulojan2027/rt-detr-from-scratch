@@ -63,3 +63,7 @@ Thumbs.db
 !docs/**/*.jpg
 HANDOFF.md
 test.ipynb
+
+# --- TensorRT engines (GPU + TensorRT-version specific) and downloaded YOLO weights ---
+engines/
+weights/
