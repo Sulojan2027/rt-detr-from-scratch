@@ -1,0 +1,21 @@
+{
+  "model": "yolov8m",
+  "conf": 0.001,
+  "iou": 0.7,
+  "max_det": 300,
+  "images": 5000,
+  "device": "NVIDIA GeForce RTX 3090",
+  "throughput_img_s": 75.69,
+  "AP": 0.4951,
+  "AP50": 0.6609,
+  "AP75": 0.539,
+  "APs": 0.3102,
+  "APm": 0.5496,
+  "APl": 0.6547,
+  "AR1": 0.3695,
+  "AR10": 0.6066,
+  "AR100": 0.6525,
+  "ARs": 0.4675,
+  "ARm": 0.712,
+  "ARl": 0.791
+}

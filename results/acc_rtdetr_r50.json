@@ -1,0 +1,19 @@
+{
+  "model": "rtdetr_r50vd",
+  "mode": "full",
+  "images": 5000,
+  "device": "NVIDIA GeForce RTX 3090",
+  "throughput_img_s": 55.59,
+  "AP": 0.5306,
+  "AP50": 0.7122,
+  "AP75": 0.5767,
+  "APs": 0.3473,
+  "APm": 0.5773,
+  "APl": 0.7011,
+  "AR1": 0.3903,
+  "AR10": 0.655,
+  "AR100": 0.7214,
+  "ARs": 0.547,
+  "ARm": 0.7646,
+  "ARl": 0.8804
+}

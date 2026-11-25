@@ -1,0 +1,59 @@
+{
+  "model": "yolov8m",
+  "precision": "fp16",
+  "device": "NVIDIA GeForce RTX 3090",
+  "input": [
+    1,
+    3,
+    640,
+    640
+  ],
+  "image": "data/coco/val2017/000000039769.jpg",
+  "params_M": 25.89,
+  "gflops": 78.9,
+  "model_ms": 13.939,
+  "post": "NMS conf=0.001 iou=0.7",
+  "post_ms": 0.959,
+  "e2e_ms": 15.083,
+  "e2e_p90_ms": 15.166,
+  "fps": 66.3,
+  "nms_sweep": [
+    {
+      "conf": 0.001,
+      "images": 50,
+      "boxes_in_mean": 375.4,
+      "boxes_in_max": 1438,
+      "boxes_out_mean": 98.9,
+      "nms_ms_mean": 0.968,
+      "nms_ms_max": 1.058
+    },
+    {
+      "conf": 0.01,
+      "images": 50,
+      "boxes_in_mean": 182.2,
+      "boxes_in_max": 681,
+      "boxes_out_mean": 36.9,
+      "nms_ms_mean": 0.938,
+      "nms_ms_max": 0.997
+    },
+    {
+      "conf": 0.05,
+      "images": 50,
+      "boxes_in_mean": 107,
+      "boxes_in_max": 408,
+      "boxes_out_mean": 16.7,
+      "nms_ms_mean": 0.944,
+      "nms_ms_max": 0.984
+    },
+    {
+      "conf": 0.25,
+      "images": 50,
+      "boxes_in_mean": 57.5,
+      "boxes_in_max": 236,
+      "boxes_out_mean": 7.4,
+      "nms_ms_mean": 0.95,
+      "nms_ms_max": 0.972
+    }
+  ],
+  "torch": "2.6.0+cu124"
+}
