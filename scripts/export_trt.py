@@ -1,5 +1,8 @@
 """Export RT-DETR, or YOLOv8 with the EfficientNMS_TRT plugin, to ONNX and a TensorRT engine; `--check-ap` gives the
-engine's COCO AP. Engines are GPU + TensorRT-version specific: build them on the machine that runs them."""
+engine's COCO AP. Engines are GPU + TensorRT-version specific: build them on the machine that runs them.
+
+Usage: python scripts/export_trt.py --model rtdetr_r50 --check-ap
+"""
 
 import argparse
 import json
@@ -71,7 +74,7 @@ def export_onnx(
 def export_rtdetr(depth: int, size: int, onnx_path: Path, opset: int) -> Path:
     """RTDETR.from_hf(depth) wrapped in RTDETRDeploy → ONNX (on CPU, FP32 — TensorRT does the FP16 part)."""
     deploy = RTDETRDeploy(RTDETR.from_hf(depth)).eval()
-    # Dummy inputs: real shapes + dtypes, values don't matter (tracing records ops, not values)
+    # Dummy inputs: only shapes and dtypes matter for tracing.
     images = torch.rand(1, 3, size, size)                  # float32, 0..1
     orig_sizes = torch.tensor([[size, size]])              # int64, (H, W)
     return export_onnx(deploy, (images, orig_sizes), onnx_path, RTDETR_INPUTS, RTDETR_OUTPUTS, opset)
@@ -105,8 +108,8 @@ class YOLOBoxesScores(nn.Module):
     """ultralytics net in export mode → (boxes [B, A, 4] xyxy pixels of the 640 input, scores [B, A, 80]).
 
     The raw head output is [B, 4 + 80, A] with (cx, cy, w, h) boxes and sigmoid class scores (A = 8400 anchors).
-    EfficientNMS wants boxes [B, A, 4] and scores [B, A, C] → transpose + split. xyxy (box_coding=0) makes the
-    output boxes unambiguous: corner format in = corner format out.
+    EfficientNMS wants boxes [B, A, 4] and scores [B, A, C]. Boxes are converted to xyxy (box_coding=0) so the
+    plugin's output boxes are also xyxy.
     """
 
     def __init__(self, net: nn.Module) -> None:

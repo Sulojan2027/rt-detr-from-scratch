@@ -1,5 +1,8 @@
 """COCO val2017 AP for RT-DETR: `--mode full` = our whole model, `ours` = our backbone + encoder with HF's decoder,
-`hf` = HF's model (reference)."""
+`hf` = HF's model (reference).
+
+Usage: python scripts/eval.py --depth 50 --mode full
+"""
 
 import argparse
 import json

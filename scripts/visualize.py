@@ -1,4 +1,7 @@
-"""Side-by-side detections for the demo, [ground truth |] RT-DETR | YOLOv8, on the same images and score threshold."""
+"""Side-by-side detections, [ground truth |] RT-DETR | YOLOv8, on the same images and score threshold.
+
+Usage: python scripts/visualize.py --num 8 --gt
+"""
 
 import argparse
 import colorsys

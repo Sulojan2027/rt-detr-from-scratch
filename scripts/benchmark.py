@@ -1,5 +1,8 @@
 """Speed and size of RT-DETR vs YOLOv8: params, GFLOPs, batch-1 latency incl. post-processing / NMS.
-Runs the PyTorch model (`--model`) or a TensorRT engine from scripts/export_trt.py (`--engine`)."""
+Runs the PyTorch model (`--model`) or a TensorRT engine from scripts/export_trt.py (`--engine`).
+
+Usage: python scripts/benchmark.py --model rtdetr_r50 --mode full
+"""
 
 import argparse
 import json

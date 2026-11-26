@@ -1,4 +1,7 @@
-"""COCO val2017 AP for YOLOv8 (ultralytics), with the same metric code as scripts/eval.py."""
+"""COCO val2017 AP for YOLOv8 (ultralytics), with the same metric code as scripts/eval.py.
+
+Usage: python scripts/eval_yolo.py --model yolov8l
+"""
 
 import argparse
 import json
@@ -60,7 +63,7 @@ def main() -> None:
         batch_ids = ids[start : start + args.batch_size]
         preds = model.predict(batch_paths, imgsz=args.imgsz, conf=args.conf, iou=args.iou, max_det=args.max_det,
                               quantize=16 if half else 32, device=device, verbose=False)
-        results = [{"boxes": r.boxes.xyxy.cpu(),               # already in ORIGINAL image pixels
+        results = [{"boxes": r.boxes.xyxy.cpu(),               # xyxy, original-image pixels
                     "labels": r.boxes.cls.long().cpu(),
                     "scores": r.boxes.conf.cpu()} for r in preds]
         detections += to_coco_detections(results, batch_ids, dataset.cat_ids)
