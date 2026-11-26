@@ -1,3 +1,5 @@
+"""Fixed 2D sine-cosine position embedding used by AIFI."""
+
 import torch
 import torch.nn as nn
 from torch import Tensor

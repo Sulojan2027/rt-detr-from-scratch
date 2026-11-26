@@ -1,21 +1,6 @@
-"""Box helpers shared by query selection, denoising, matcher, losses and post-processing.
+"""Box format conversions, IoU / GIoU and inverse sigmoid (same conventions as HF).
 
-Conventions (same as HF):
-- Boxes are **normalised** to [0, 1] by image width / height.
-- The model and the targets use **(cx, cy, w, h)** (centre format).
-- IoU / GIoU and COCO use **corners (x1, y1, x2, y2)**; COCO json itself uses (x, y, w, h) in pixels.
-
-HF reference: `transformers/image_transforms.py` (`center_to_corners_format`, `corners_to_center_format`),
-`transformers/loss/loss_for_object_detection.py` (`box_iou`, `generalized_box_iou`),
-`modeling_rt_detr.py::inverse_sigmoid`.
-
-Self-checks once written:
-    b = torch.tensor([[0.5, 0.5, 0.2, 0.4]])
-    box_cxcywh_to_xyxy(b)                         → [[0.4, 0.3, 0.6, 0.7]]
-    box_xyxy_to_cxcywh(box_cxcywh_to_xyxy(b))     → b   (round trip)
-    box_iou(xyxy, xyxy)[0]                        → [[1.0]]
-    generalized_box_iou(far_apart_a, far_apart_b) → negative (→ -1 as they move apart)
-    inverse_sigmoid(torch.sigmoid(x))             ≈ x   (for |x| < ~10)
+Model outputs and targets are normalised (cx, cy, w, h); IoU / GIoU take corners (x1, y1, x2, y2).
 """
 
 import torch

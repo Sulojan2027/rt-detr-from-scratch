@@ -1,16 +1,7 @@
-"""Detections → COCO json results → mAP with pycocotools.
+"""Convert detections to COCO result format and compute bbox mAP with pycocotools.
 
-Flow:  post_process(threshold=0.0) per image  →  to_coco_detections  →  evaluate_coco  →  12 COCO stats.
-
-COCO result format (one dict per box, pixels, ORIGINAL image size):
-    {"image_id": 139, "category_id": 1, "bbox": [x, y, w, h], "score": 0.93}
-    - category_id is the COCO id (1..90 with gaps), NOT our 0..79 label → map with dataset.cat_ids[label]
-    - bbox is [x, y, w, h], NOT xyxy                                        → w = x2 - x1, h = y2 - y1
-
-Self-checks once written:
-    - Feed the GROUND TRUTH back in as detections (score 1.0) → AP = 1.0. Best way to test the mapping + bbox format.
-    - HF R18 on full val2017 → AP ≈ 0.465 (paper Table 1: 46.5). R50 ≈ 0.531.
-    - Our backbone + encoder inside HF's decoder (`encoder_outputs=`) → the same AP (to ~0.001).
+COCO results use the original COCO category id (1..90, via `dataset.cat_ids[label]`) and
+[x, y, w, h] boxes in original-image pixels.
 """
 
 from pycocotools.cocoeval import COCOeval

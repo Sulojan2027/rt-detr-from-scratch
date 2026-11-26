@@ -1,19 +1,7 @@
-"""COCO 2017 detection dataset.
+"""COCO 2017 detection dataset (images + targets in the HF format, see `transforms.py`).
 
-Layout (README "Data"):
-    data/coco/annotations/instances_val2017.json
-    data/coco/val2017/*.jpg
-
-Category ids — the classic COCO trap:
-    COCO json uses 80 category ids in 1..90 **with gaps** (no 12, 26, 29, ...).
-    The HF / official checkpoints predict **contiguous** labels 0..79 (hf.config.id2label[0] == "person").
-    So: label = index of cat_id in sorted(coco.getCatIds()); for eval map back with the same list (`ds.cat_ids`).
-
-val2017 facts (verified): 5000 images, 36,781 annotations (446 crowd), 48 images without annotations,
-10 grayscale images, first sorted id 139 (426×640).
-
-For evaluation only `image_id` and `orig_size` are used (COCOeval reads ground truth from the json itself);
-`boxes` / `class_labels` are for drawing ground truth in the demo.
+COCO category ids are 1..90 with gaps; the checkpoints predict contiguous labels 0..79, so
+label = index of the category id in `ds.cat_ids` (sorted), and `ds.cat_ids[label]` maps back for evaluation.
 """
 
 from pathlib import Path
@@ -26,7 +14,7 @@ from torch.utils.data import Dataset
 
 
 class CocoDetection(Dataset):
-    """Returns (image [3, H, W], target dict) in the format described in `transforms.py`."""
+    """Returns (image [3, H, W], target dict); boxes are normalised cxcywh, crowd annotations skipped."""
 
     def __init__(self, img_folder: str | Path, ann_file: str | Path, transforms=None) -> None:
         self.coco = COCO(str(ann_file))
@@ -47,7 +35,7 @@ class CocoDetection(Dataset):
 
         anns = self.coco.loadAnns(self.coco.getAnnIds(imgIds=image_id, iscrowd=False))
         boxes, labels = [], []
-        for ann in anns:                                  # read-only: these dicts are COCOeval's ground truth
+        for ann in anns:                                  # read-only: shared with COCOeval's ground truth
             x, y, w, h = ann["bbox"]
             x1, y1 = max(x, 0.0), max(y, 0.0)             # clip to the image
             x2, y2 = min(x + w, W), min(y + h, H)

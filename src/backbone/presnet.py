@@ -1,3 +1,5 @@
+"""ResNet-vd backbone (PResNet), with module names matching HF `RTDetrResNetBackbone` so its weights load directly."""
+
 from collections import OrderedDict
 
 import torch.nn as nn
@@ -56,7 +58,6 @@ class BasicBlock(nn.Module):
         variant: str = "d",
     ) -> None:
         super().__init__()
-        # Validate arguments
         _validate_args(ch_in, ch_out, stride, shortcut, variant)
         
         self.shortcut = nn.Identity() if shortcut else _make_shortcut(ch_in, ch_out, stride, variant)
@@ -217,7 +218,7 @@ class PResNet(nn.Module):
             ch_in = stage.out_channels
             all_channels.append(stage.out_channels)
 
-        # ---- Interface contract (Person B relies on these) ----
+        # ---- Interface used by the encoder ----
         self.return_idx = return_idx
         self.out_channels = [all_channels[i] for i in return_idx]
         self.out_strides = [_STAGE_STRIDES[i] for i in return_idx]

@@ -1,19 +1,13 @@
-"""RT-DETR set-prediction loss: VFL + L1 + GIoU, on final, auxiliary and denoising outputs.
+"""RT-DETR set-prediction loss: VFL + L1 + GIoU on final, auxiliary and denoising outputs.
 
-Paper: RT-DETR §4.2 (VFL makes the class score IoU-aware → "uncertainty-minimal query selection").
-HF: `RTDetrLoss` + `RTDetrForObjectDetectionLoss` in `transformers/loss/loss_rt_detr.py`. Training only.
+RT-DETR §4.2 (VFL makes the class score IoU-aware). Mirrors HF `RTDetrLoss` (`transformers/loss/loss_rt_detr.py`).
+Weights: vfl 1, bbox 5, giou 2; VFL alpha = 0.75, gamma = 2.0 (the matcher uses its own alpha = 0.25).
 
-Weights (hf.config): weight_loss_vfl = 1, weight_loss_bbox = 5, weight_loss_giou = 2;
-VFL focal_loss_alpha = 0.75, focal_loss_gamma = 2.0.  (Matcher uses its OWN alpha 0.25 — different number.)
-
-Which outputs get losses (HF with auxiliary_loss=True):
-    final layer                         → matched with the Hungarian matcher
+Which outputs get losses:
+    final layer                         → Hungarian matching
     each earlier decoder layer (aux)    → re-matched per layer          keys "..._aux_{i}"
     encoder top-k proposals (aux)       → re-matched                     (appended as the last aux output)
-    denoising groups (dn)               → FIXED matching from dn_meta    keys "..._dn_{i}", num_boxes × dn_num_group
-
-Self-check: build HF's criterion `RTDetrLoss(hf.config)` and feed it the SAME outputs dict + targets → identical
-loss dict (same keys, values to ~1e-6). Easiest with fake random outputs, no model needed.
+    denoising groups (dn)               → fixed matching from dn_meta    keys "..._dn_{i}", num_boxes × dn_num_group
 """
 
 import torch
@@ -56,23 +50,23 @@ class RTDetrLoss(nn.Module):
         logits = outputs["logits"]  # [B, Q, C]
         idx = self._src_idx(indices)
 
-        # IoU between every matched prediction and its GT. It is a *target*, so no gradient flows through it.
+        # IoU of each matched pair; used as a target, so computed without gradient.
         pred_boxes = outputs["pred_boxes"][idx]
         gt_boxes = self._matched_targets(targets, indices, "boxes")
         ious = box_iou(box_cxcywh_to_xyxy(pred_boxes.detach()), box_cxcywh_to_xyxy(gt_boxes))[0].diag()
 
-        # One-hot class targets [B, Q, C]. Unmatched queries get the extra "no object" class,
-        # which is dropped again afterwards, so they end up as all zeros.
+        # One-hot class targets [B, Q, C]; unmatched queries get the extra "no object" class, which is then
+        # dropped, leaving all zeros.
         target_classes = torch.full(logits.shape[:2], self.num_classes, dtype=torch.int64, device=logits.device)
         target_classes[idx] = self._matched_targets(targets, indices, "class_labels")
         one_hot = F.one_hot(target_classes, num_classes=self.num_classes + 1)[..., :-1]
 
-        # The target for the matched class is the IoU instead of 1, so the score learns to mean "how good is my box".
+        # Target for the matched class is the IoU instead of 1.
         iou_per_query = torch.zeros(logits.shape[:2], dtype=logits.dtype, device=logits.device)
         iou_per_query[idx] = ious.to(logits.dtype)
         target_score = iou_per_query.unsqueeze(-1) * one_hot
 
-        # Negatives are down-weighted by how confident the model already is (focal-style); positives by their IoU.
+        # Negatives weighted focal-style by the predicted score; positives by their IoU.
         pred_score = logits.detach().sigmoid()
         weight = self.alpha * pred_score.pow(self.gamma) * (1 - one_hot) + target_score
 
@@ -102,7 +96,7 @@ class RTDetrLoss(nn.Module):
                 empty = torch.zeros(0, dtype=torch.int64, device=device)
                 matches.append((empty, empty))
                 continue
-            # Every denoising group holds a noisy copy of every GT, in the same order.
+            # Every denoising group holds a copy of every GT, in the same order.
             gt_idx = torch.arange(num_gt, dtype=torch.int64, device=device).tile(dn_meta["dn_num_group"])
             if len(positive_idx) != len(gt_idx):
                 raise ValueError("dn_positive_idx and the number of ground-truth boxes do not agree.")
@@ -117,18 +111,17 @@ class RTDetrLoss(nn.Module):
     def forward(self, outputs: dict, targets: list[dict]) -> dict[str, Tensor]:
         """outputs: {"logits", "pred_boxes", optional "aux_outputs", "dn_outputs", "dn_meta"}; targets as in the matcher.
         → dict of weighted losses; the training loss is `sum(losses.values())`."""
-        # Average number of GT boxes, used to normalise every loss (at least 1, so empty batches work).
+        # Number of GT boxes in the batch (at least 1), used to normalise every loss.
         num_boxes = max(sum(len(t["class_labels"]) for t in targets), 1)
 
-        # Final decoder layer: match once, then supervise the matched pairs.
         indices = self.matcher(outputs, targets)
         losses = self._weighted_losses(outputs, targets, indices, num_boxes)
 
-        # Earlier decoder layers and the encoder proposals are matched again on their own predictions.
+        # Earlier decoder layers and the encoder proposals are re-matched on their own predictions.
         for i, aux in enumerate(outputs.get("aux_outputs", [])):
             losses.update(self._weighted_losses(aux, targets, self.matcher(aux, targets), num_boxes, f"_aux_{i}"))
 
-        # Denoising queries do not need the matcher: which query belongs to which GT is known in advance.
+        # Denoising queries use the fixed assignment, not the matcher.
         if "dn_outputs" in outputs:
             dn_meta = outputs["dn_meta"]
             dn_indices = self.get_cdn_matched_indices(dn_meta, targets)

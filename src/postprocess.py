@@ -1,25 +1,7 @@
-"""Model outputs → final detections per image.
+"""Turn model outputs into final detections (scores, labels, xyxy pixel boxes) per image.
 
-RT-DETR needs **no NMS**: the Hungarian matcher trains each object to one query, so post-processing is only
-"score, pick top-k, convert boxes".
-
-HF reference: `RTDetrImageProcessor.post_process_object_detection` (use_focal_loss=True branch),
-`transformers/models/rt_detr/image_processing_rt_detr.py`.
-
-Inputs (from the decoder's last layer, HF `outputs.logits` / `outputs.pred_boxes`):
-    logits      [B, Q, C]   raw class logits, Q = 300 queries, C = 80 classes (sigmoid, NOT softmax — no "no-object" class)
-    pred_boxes  [B, Q, 4]   normalised (cx, cy, w, h)
-    target_sizes [B, 2]     ORIGINAL image (height, width) — boxes must be scaled back to the original image, not 640×640
-
-Output: list of B dicts {"scores": [K], "labels": [K] (0..79), "boxes": [K, 4] xyxy in pixels}.
-
-Self-check once written (should be EXACT, diff 0.0):
-    hf = RTDetrForObjectDetection.from_pretrained("PekingU/rtdetr_r18vd").eval()
-    proc = AutoImageProcessor.from_pretrained("PekingU/rtdetr_r18vd")
-    out = hf(**proc(images=img, return_tensors="pt"))
-    ref = proc.post_process_object_detection(out, threshold=0.5, target_sizes=[img.size[::-1]])
-    ours = post_process(out.logits, out.pred_boxes, torch.tensor([img.size[::-1]]), threshold=0.5)
-    → same scores / labels / boxes (try the COCO cats image, val2017/000000039769.jpg).
+No NMS is needed: one-to-one Hungarian matching trains each object to a single query. Matches HF
+`RTDetrImageProcessor.post_process_object_detection` (focal-loss branch: sigmoid, not softmax).
 """
 
 import torch
@@ -34,9 +16,10 @@ def topk_detections(
     target_sizes: Tensor,
     num_top: int | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Tensor-only core (fixed-size outputs, ONNX/TensorRT-exportable).
+    """Top-k over all (query, class) pairs; fixed-size outputs, so it exports to ONNX / TensorRT.
 
-    [B, Q, C] logits + [B, Q, 4] cxcywh boxes + [B, 2] (h, w) → scores [B, K], labels [B, K], boxes [B, K, 4] xyxy pixels.
+    logits [B, Q, C], pred_boxes [B, Q, 4] normalised cxcywh, target_sizes [B, 2] original (h, w)
+    → scores [B, K], labels [B, K], boxes [B, K, 4] xyxy in original-image pixels.
     """
     boxes = box_cxcywh_to_xyxy(pred_boxes)
     img_h, img_w = target_sizes.unbind(1)

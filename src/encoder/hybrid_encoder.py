@@ -1,3 +1,5 @@
+"""Hybrid encoder: input projections + AIFI on the top level + CCFF fusion."""
+
 import torch.nn as nn
 from torch import Tensor
 

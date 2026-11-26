@@ -1,3 +1,5 @@
+"""Shared conv building blocks: activation lookup, Conv-BN-act layers and frozen BatchNorm."""
+
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -127,14 +129,11 @@ class ConvLayer(nn.Module):
         return self.activation(x)
 
 def freeze_batch_norm2d(module: nn.Module) -> nn.Module:
-    """Recursively replace every nn.BatchNorm2d with FrozenBatchNorm2d.
+    """Recursively replace every nn.BatchNorm2d with FrozenBatchNorm2d, copying its parameters and stats.
 
-    Copies weight/bias/running stats/eps so it works before or after
-    loading pretrained weights. Returns the (possibly new) module:
-        model = freeze_batch_norm2d(model)
+    Returns the (possibly new) module, so use `model = freeze_batch_norm2d(model)`.
     """
     
-    # Check if module is standard BatchNorm
     if isinstance(module, nn.BatchNorm2d):
         frozen_bn = FrozenBatchNorm2d(module.num_features, eps=module.eps)
         
@@ -152,7 +151,6 @@ def freeze_batch_norm2d(module: nn.Module) -> nn.Module:
             
         return frozen_bn
         
-    # Check with children and update recursively
     for name, child in module.named_children():
         new_child = freeze_batch_norm2d(child)
         if new_child is not child:

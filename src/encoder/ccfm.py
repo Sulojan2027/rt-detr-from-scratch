@@ -1,3 +1,5 @@
+"""CNN-based cross-scale feature fusion (CCFF, paper Sec. 4.2): FPN + PAN built from CSP / RepVGG blocks."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -81,20 +83,17 @@ class CCFM(nn.Module):
         )
 
     def forward(self, feats: list[Tensor]) -> list[Tensor]:
-        # Feature inputs (unrolled for the 3 RT-DETR levels)
         s3, s4, f5 = feats
 
-        # FPN
-        # 1st block
+        # FPN (top-down)
         y5 = self.lateral_convs[0](f5)
         up2_y5 = F.interpolate(y5, scale_factor=2.0, mode="nearest")
         x4 = self.fpn_blocks[0](torch.cat([up2_y5, s4], dim=1))
-        # 2nd block
         y4 = self.lateral_convs[1](x4)
         up2_y4 = F.interpolate(y4, scale_factor=2.0, mode="nearest")
         p3 = self.fpn_blocks[1](torch.cat([up2_y4, s3], dim=1))
 
-        # PAN (re-uses the lateral outputs y4, y5)
+        # PAN (bottom-up), re-using the lateral outputs y4, y5
         n4 = self.pan_blocks[0](torch.cat([self.downsample_convs[0](p3), y4], dim=1))
         n5 = self.pan_blocks[1](torch.cat([self.downsample_convs[1](n4), y5], dim=1))
 

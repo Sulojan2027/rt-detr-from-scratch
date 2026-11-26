@@ -1,20 +1,7 @@
-"""The whole RT-DETR, built only from our modules, and its deploy wrapper for ONNX / TensorRT.
+"""Full RT-DETR model built from this repo's modules, plus a deploy wrapper for ONNX / TensorRT.
 
-    image [B, 3, 640, 640]
-      → PResNet (Person A)          → [C3, C4, C5]
-      → HybridEncoder (Person A)    → [P3, N4, N5]   all 256 channels
-      → RTDetrTransformer (Person B)→ {"logits" [B, 300, 80], "pred_boxes" [B, 300, 4] cxcywh 0..1, + training extras}
-
-Two classes:
-    RTDETR        — the model. `RTDETR.from_hf(18)` = our code + the authors' pretrained weights (HF only downloads them).
-    RTDETRDeploy  — what goes into ONNX / TensorRT: model + `topk_detections`, so the engine returns final
-                    detections (no post-processing left in Python, like the paper's end-to-end latency).
-
-Self-check (tests/test_model.py):
-    RTDETR.from_hf(18) vs HF `RTDetrForObjectDetection` on one image: sigmoid(logits), pred_boxes max |diff| < 1e-4
-    params: R18 20.17 M | R50 42.89 M
-    RTDETRDeploy(model)(x, sizes) → scores [1, 300], labels [1, 300] int32, boxes [1, 300, 4] — equal to
-    `topk_detections` called on the model's own output.
+    image [B, 3, 640, 640] → PResNet → [C3, C4, C5] → HybridEncoder → [P3, N4, N5] (256 ch)
+      → RTDetrTransformer → {"logits" [B, 300, 80], "pred_boxes" [B, 300, 4] normalised cxcywh, ...}
 """
 
 import torch
@@ -43,7 +30,7 @@ class RTDETR(nn.Module):
 
     @classmethod
     def from_hf(cls, depth: int = 18) -> "RTDETR":
-        """Load HuggingFace weights to our model."""
+        """Build the model and load the pretrained PekingU/rtdetr_r{depth}vd weights from Hugging Face."""
         from transformers import RTDetrForObjectDetection
         hf_sd = RTDetrForObjectDetection.from_pretrained(f"PekingU/rtdetr_r{depth}vd").state_dict()
         model = cls(depth)
@@ -54,11 +41,11 @@ class RTDETR(nn.Module):
 
 
 class RTDETRDeploy(nn.Module):
-    """ONNX / TensorRT wrapper: (images, orig_sizes) → final detections.
+    """Model + top-k post-processing in one graph, so an exported engine returns final detections.
 
-    images      [B, 3, H, W]  float, 0..1 (our transforms: no mean/std)
-    orig_sizes  [B, 2]        (H, W) of the ORIGINAL images, so boxes come out in original pixels
-    →  scores [B, K] float, labels [B, K] int32 (0..79), boxes [B, K, 4] xyxy pixels       K = num_top (300)
+    images      [B, 3, H, W]  float in [0, 1] (no mean/std normalisation)
+    orig_sizes  [B, 2]        (H, W) of the original images; boxes are returned in original pixels
+    →  scores [B, K] float, labels [B, K] int32 (0..79), boxes [B, K, 4] xyxy pixels; K = num_top
     """
 
     def __init__(self, model: RTDETR, num_top: int = 300) -> None:

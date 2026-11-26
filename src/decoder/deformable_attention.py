@@ -1,18 +1,13 @@
 """Multi-scale deformable cross-attention (decoder queries → encoder features).
 
-Paper: RT-DETR §4.3 (decoder from Deformable DETR, arXiv:2010.04159 §4.1).
-HF reference: `modeling_rt_detr.py` — `MultiScaleDeformableAttention` (pure-PyTorch core) and
-`RTDetrMultiscaleDeformableAttention` (the module with weights).
-
-Idea in one line: instead of attending to all 8400 encoder tokens, every query looks at only
-n_heads × n_levels × n_points = 8 × 3 × 4 = 96 points, placed around its reference box by learned offsets.
-
-HF names (must match for strict loading; prefix `model.decoder.layers.N.encoder_attn.`):
+RT-DETR §4.3, from Deformable DETR (arXiv:2010.04159 §4.1). Each query samples only
+n_heads × n_levels × n_points = 8 × 3 × 4 = 96 points around its reference box instead of all S encoder tokens.
+Pure-PyTorch (grid_sample) port of HF `MultiScaleDeformableAttention` / `RTDetrMultiscaleDeformableAttention`;
+parameter names match HF for strict loading (`model.decoder.layers.N.encoder_attn.`):
     sampling_offsets   Linear(256, n_heads*n_levels*n_points*2 = 192)
     attention_weights  Linear(256, n_heads*n_levels*n_points   = 96)
     value_proj         Linear(256, 256)
     output_proj        Linear(256, 256)
-Self-check: params = 205,600.
 
 Shapes (B batch, Q queries = 300 (+ denoising), S = sum(H_l*W_l) = 8400 at 640², L levels = 3, h heads = 8,
 d = 256 / 8 = 32, P points = 4):
@@ -45,7 +40,7 @@ def multi_scale_deformable_attn(
     B, _, num_heads, head_dim = value.shape
     _, num_queries, _, num_levels, num_points, _ = sampling_locations.shape
 
-    # The tokens of all levels sit in one long sequence; cut it back into one chunk per level.
+    # Split the flattened token sequence back into one chunk per level.
     value_per_level = value.split([H * W for H, W in spatial_shapes], dim=1)
 
     # grid_sample expects coordinates in [-1, 1], ours are in [0, 1].
@@ -53,14 +48,13 @@ def multi_scale_deformable_attn(
 
     sampled_per_level = []
     for level, (H, W) in enumerate(spatial_shapes):
-        # [B, H*W, h, d] → [B, h, d, H, W] → [B*h, d, H, W]  (heads are folded into the batch,
-        # so every head can sample its own points in one grid_sample call)
+        # [B, H*W, h, d] → [B, h, d, H, W] → [B*h, d, H, W]  (heads folded into the batch)
         level_value = value_per_level[level].flatten(2).transpose(1, 2).reshape(B * num_heads, head_dim, H, W)
 
         # [B, Q, h, P, 2] → [B, h, Q, P, 2] → [B*h, Q, P, 2]
         level_grid = sampling_grids[:, :, :, level].transpose(1, 2).flatten(0, 1)
 
-        # Bilinear read at every sampling point → [B*h, d, Q, P]
+        # → [B*h, d, Q, P]
         sampled = F.grid_sample(
             level_value,
             level_grid,
@@ -109,7 +103,7 @@ class MultiscaleDeformableAttention(nn.Module):
         position_embeddings: Tensor | None = None,
     ) -> Tensor:
         # hidden_states [B, Q, D], encoder_hidden_states [B, S, D], reference_points [B, Q, 1, 4] → [B, Q, D]
-        # Offsets and weights are predicted from the query (with its position added), values from the memory.
+        # Offsets and weights come from query + position, values from the memory.
         query = hidden_states if position_embeddings is None else hidden_states + position_embeddings
 
         B, num_queries, _ = query.shape
@@ -126,8 +120,7 @@ class MultiscaleDeformableAttention(nn.Module):
         weights = self.attention_weights(query).view(B, num_queries, self.n_heads, self.n_levels * self.n_points)
         weights = weights.softmax(dim=-1).view(B, num_queries, self.n_heads, self.n_levels, self.n_points)
 
-        # Reference box is (cx, cy, w, h). The centre is where we start; the offsets are scaled by the
-        # box size, so a bigger object spreads its sampling points over a bigger area.
+        # Offsets are relative to the reference box (cx, cy, w, h): centred on it and scaled by its size.
         ref_center = reference_points[:, :, None, :, None, :2]  # [B, Q, 1, L or 1, 1, 2]
         ref_size = reference_points[:, :, None, :, None, 2:]
         sampling_locations = ref_center + offsets / self.n_points * ref_size * 0.5

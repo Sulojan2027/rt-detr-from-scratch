@@ -35,7 +35,7 @@ def encoder_state_dict(hf_sd: dict[str, Tensor]) -> dict[str, Tensor]:
     return proj | enc_body
 
 
-# Person B: HF keeps query selection + decoder directly under `model.` (siblings of `model.encoder`).
+# HF keeps query selection + decoder directly under `model.` (siblings of `model.encoder`).
 DECODER_PARTS = ("decoder_input_proj", "denoising_class_embed", "enc_output", "enc_score_head", "enc_bbox_head", "decoder")
 
 

@@ -1,3 +1,5 @@
+"""AIFI: single-scale Transformer encoder applied to the stride-32 feature map (paper Sec. 4.2)."""
+
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -57,18 +59,15 @@ class SelfAttention(nn.Module):
         k = k.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # Score
         scores = torch.matmul(q, k.transpose(-2, -1))
         scaled_scores = scores * self.scaling
         if attn_mask is not None:
             scaled_scores = scaled_scores + attn_mask
         attn_weights = scaled_scores.softmax(dim=-1)
 
-        # Attention
         attn_scores = attn_weights @ v
         attn_scores = attn_scores.transpose(1, 2).reshape(B, N, self.hidden_size)
 
-        # Projection
         out = self.o_proj(attn_scores)
         return out
 
