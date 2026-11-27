@@ -4,7 +4,7 @@ A from-scratch PyTorch reimplementation of **RT-DETR**, benchmarked against YOLO
 
 > **DETRs Beat YOLOs on Real-time Object Detection** — Zhao et al., CVPR 2024 · [arXiv:2304.08069](https://arxiv.org/abs/2304.08069)
 
-📊 Presentation: [slides (PDF)](<docs/DeepMind DETR Beats YOLO.pdf>) · [PowerPoint](<docs/DeepMind DETR Beats YOLO.pptx>)
+📊 Presentation: [slides (PDF)](docs/RT-DETR_presentation.pdf) · [PowerPoint](docs/RT-DETR_presentation.pptx)
 
 ## Results at a glance
 
