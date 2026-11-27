@@ -37,9 +37,8 @@ outputs/
 logs/
 *.log
 
-# --- Data ---
-/data/
-!/data/.gitkeep
+# --- Data (a symlink to the big disk on our server: no trailing slash, so the link is matched too) ---
+/data
 *.zip
 *.tar
 *.tar.gz
@@ -61,9 +60,19 @@ Thumbs.db
 *.jpeg
 !docs/**/*.png
 !docs/**/*.jpg
-HANDOFF.md
+HANDOFF*.md
+/*.pdf
 test.ipynb
 
 # --- TensorRT engines (GPU + TensorRT-version specific) and downloaded YOLO weights ---
-engines/
-weights/
+/engines
+/weights
+
+# --- Results: commit only the final numbers (results/*.json); logs, dry runs, plots and images are regenerated ---
+/results/*
+!/results/*.json
+
+# --- Demo media (CC BY-SA, large; sources in README) and the server-specific GPU-wait launcher ---
+/videos/
+/images/
+scripts/wait_gpu_run.sh

@@ -1,157 +1,159 @@
 # RT-DETR From Scratch
 
-A from-scratch PyTorch reimplementation of the core ideas from:
+A from-scratch PyTorch reimplementation of **RT-DETR**, benchmarked against YOLOv8 with TensorRT.
 
-> **DETRs Beat YOLOs on Real-time Object Detection**
-> Yian Zhao, Wenyu Lv, Shangliang Xu, Jinman Wu, Guanzhong Wang, Qingqing Dang, Yi Liu, Jie Chen
-> [arXiv:2304.08069](https://arxiv.org/abs/2304.08069)
+> **DETRs Beat YOLOs on Real-time Object Detection** — Zhao et al., CVPR 2024 · [arXiv:2304.08069](https://arxiv.org/abs/2304.08069)
 
-This project is built for learning purposes. References are the [official implementation](https://github.com/lyuwenyu/RT-DETR) and the [Hugging Face `transformers` implementation](https://github.com/huggingface/transformers/tree/main/src/transformers/models/rt_detr). Module names follow Hugging Face, so the pretrained `PekingU/rtdetr_r18vd` / `rtdetr_r50vd` weights load into our modules with `load_state_dict(strict=True)` after only stripping a key prefix, and our outputs are checked numerically against HF's. Divergences are noted in [`docs/implementation_notes.md`](docs/implementation_notes.md).
+📊 Presentation: [slides (PDF)](<docs/DeepMind DETR Beats YOLO.pdf>) · [PowerPoint](<docs/DeepMind DETR Beats YOLO.pptx>)
 
-## Team
+## Results at a glance
 
-| Name | Focus area |
-|---|---|
-| Person A | Backbone + Hybrid Encoder (AIFI + CCFM) |
-| Person B | Decoder + Query Selection + Matcher + Losses |
-| Shared | Box ops, post-processing, data pipeline, COCO eval |
+- ✅ **Accuracy reproduced:** our model gets **46.4 / 53.1 AP** (R18 / R50) on COCO val2017, against the paper's 46.5 / 53.1.
+- ✅ **Same model as the authors':** loaded with their weights, our outputs differ from theirs by at most **3.7 × 10⁻⁶** (R18).
+- ✅ **Speed claim reproduced:** with TensorRT FP16, RT-DETR-R50 runs **1.67× faster** than YOLOv8-L at the same accuracy (paper: 1.52×).
+- ✅ **No NMS:** YOLOv8-L's end-to-end time almost doubles at its best-accuracy setting (3.46 → 6.50 ms) because of NMS. RT-DETR has no NMS step and no threshold to tune.
 
-## Why RT-DETR
+## Why this paper
 
-RT-DETR removes the need for NMS post-processing (unlike YOLO-family detectors) while matching or beating YOLO's real-time speed/accuracy tradeoff, by:
-1. An **efficient hybrid encoder** — decouples intra-scale interaction (transformer) from cross-scale fusion (CNN-based), instead of naive multi-scale deformable attention.
-2. **Uncertainty-minimal query selection** — selects encoder features for decoder queries using both classification and localization scores (IoU-aware), not just objectness.
-3. Support for **flexible speed tuning** by adjusting decoder layers without retraining.
+Before RT-DETR, there were two kinds of detector:
+- **YOLO** is fast, but it needs **NMS** after the network to delete duplicate boxes. NMS adds latency and two thresholds to tune, and in crowds it can delete real objects.
+- **DETR** needs no NMS, because each object gets exactly one prediction. But it was far too slow for real time.
 
-## Architecture Status
+RT-DETR was the first detector to combine both: **end-to-end (NMS-free) and real-time**. It's the base of the real-time DETR family that followed (e.g. RT-DETRv2, D-FINE, DEIM).
 
-| Component | Status | Notes |
-|---|---|---|
-| Backbone (ResNet-vd R18 / R50) | ✅ Done | HF weights, C3–C5 bit-exact vs HF |
-| AIFI (intra-scale transformer) | ✅ Done | HF parity ~2e-6 |
-| CCFM / CCFF (cross-scale fusion) | ✅ Done | HF parity exact |
-| Hybrid encoder (proj + AIFI + CCFM) | ✅ Done | image → P3/N4/N5 vs HF ≤ 4.3e-6 |
-| Query selection (IoU-aware) | ✅ Done | `src/decoder/rtdetr_transformer.py`; scores / boxes vs HF ≤ 1e-5, selection exact |
-| Decoder + auxiliary heads | ✅ Done | `src/decoder/{deformable_attention,decoder}.py`, HF parity ≤ 1e-4 |
-| Contrastive denoising | ✅ Done | `src/decoder/denoising.py`; bit-identical to HF under the same seed |
-| Hungarian matcher | ✅ Done | `src/matcher/hungarian.py`; identical matches to HF |
-| Loss (VFL + L1 + GIoU) | ✅ Done | `src/losses/rtdetr_loss.py`; final, auxiliary and denoising losses match HF ≤ 1e-5 |
-| Post-processing | 🟨 Skeleton | `src/postprocess.py` (shared) |
-| COCO data pipeline | 🟨 Skeleton | `src/data/` (shared) |
-| COCO eval (mAP) | 🟨 Skeleton | `src/eval/coco_eval.py`, `scripts/eval.py` (shared) |
-| Training loop | ⬜ Not planned | we load the authors' pretrained weights into our implementation (matcher, loss and denoising are ready if one is added) |
-| Speed benchmark (latency incl. NMS) vs YOLO | ⬜ Not started | core goal: RT-DETR vs YOLO |
+We chose to implement it because:
+1. **It answers a clear question:** can a transformer detector beat YOLO on speed *and* accuracy? We can test that claim on our own hardware.
+2. **Every part can be built and checked:** a ResNet backbone, a hybrid encoder (AIFI + CCFF), query selection, a deformable decoder, Hungarian matching and the losses. We wrote all of them and verified each one against the authors' model.
 
-Use ⬜ Not started / 🟨 Skeleton or in progress / ✅ Done. Skeleton files contain signatures, shapes, hints and self-check numbers; they raise `NotImplementedError` until filled in.
+## Paper vs ours
 
-## Correctness: parity with Hugging Face
+All of our numbers are on COCO val2017 (5,000 images), measured on an **RTX 3090** with **TensorRT 10.16 FP16** at batch 1. The paper used a **T4**.
 
-Same input through our module and HF's, both in `eval()` with the PekingU weights. Max abs difference:
+### Accuracy (COCO AP)
 
-| Check | R18 | R50 |
-|---|---|---|
-| Backbone C3 / C4 / C5 | 0.0 | 0.0 |
-| Hybrid encoder P3 / N4 / N5 (same C3–C5) | ≤ 4e-6 | ≤ 1.1e-5 |
-| image → our backbone → our encoder vs HF full forward | ≤ 3e-6 | ≤ 4.3e-6 |
-| our P3–P5 into HF's decoder: scores / boxes | 2.6e-6 / 6.4e-6 | 5.8e-7 / 7.0e-6 |
-| HF's P3–P5 into our query selection + decoder: selection / scores / boxes | 0.0 / 1.9e-6 / 8.6e-6 | 0.0 / 7.0e-7 / 2.6e-6 |
+| Model | Paper | Ours (PyTorch) | Ours (TensorRT FP16) |
+|---|---|---|---|
+| **RT-DETR-R18** | 46.5 | **46.4** | **46.4** |
+| **RT-DETR-R50** | 53.1 | **53.1** | **53.0** |
+| YOLOv8-S | 44.9 | 44.3 | 44.9 |
+| YOLOv8-M | 50.2 | 49.5 | 50.2 |
+| YOLOv8-L | 52.9 | 52.1 | 52.7 |
+| YOLOv8-X | 53.9 | 53.1 | 53.8 |
 
-Tolerance is 1e-4. See [`notebooks/03_hf_parity.ipynb`](notebooks/03_hf_parity.ipynb) and `pytest -m slow`.
+The FP16 engines lose under 0.1 AP compared with PyTorch. YOLO's PyTorch column comes from ultralytics `predict()`, which pre-processes slightly differently from the official val. Our TensorRT path letterboxes exactly like val and matches the paper.
 
-| Model | Params backbone + encoder (ours) | Params full model (ours) | mAP (paper) | mAP (ours) |
+### Speed (end-to-end, NMS included for YOLO)
+
+| Model | Params | GFLOPs | Paper FPS (T4) | **Our FPS (3090)** | Our latency |
+|---|---|---|---|---|---|
+| **RT-DETR-R18** | 20.2 M | 61.5 | 217 | **497** | 2.01 ms |
+| **RT-DETR-R50** | 42.9 M | 137.8 | 108 | **258** | 3.87 ms |
+| YOLOv8-S | 11 M | 29 | — | 201 | 4.98 ms |
+| YOLOv8-M | 26 M | 79 | — | 186 | 5.37 ms |
+| YOLOv8-L | 43 M | 165 | 71 | 154 | 6.48 ms |
+| YOLOv8-X | 68 M | 257 | 50 | 131 | 7.63 ms |
+
+**RT-DETR-R50 ÷ YOLOv8-L FPS: 1.52× (paper) → 1.67× (ours).**
+
+Every model runs about 2.3× faster on our 3090 than on the paper's T4, because the 3090 is a faster GPU. So compare the **ratios**, not the absolute FPS. YOLO is timed at NMS score threshold 0.001, the paper's best-accuracy setting.
+
+### The cost of NMS (YOLOv8-L)
+
+| Score threshold | Paper AP | Paper NMS time | **Our AP** | **Our end-to-end** |
 |---|---|---|---|---|
-| RT-DETR-R18 | 16.16 M | 20.17 M | 46.5 | — (needs `scripts/eval.py` on val2017) |
-| RT-DETR-R50 | 35.42 M | 42.89 M | 53.1 | — |
+| 0.001 | 52.9 | 2.36 ms | 52.7 | 6.50 ms |
+| 0.01 | 52.4 | 1.73 ms | 52.3 | 3.46 ms |
+| 0.05 | 51.2 | 1.06 ms | 51.2 | 3.68 ms |
+| *RT-DETR-R50* | *—* | ***0 ms (no NMS)*** | *53.0* | *3.87 ms* |
 
-### Using the pretrained weights
+A lower threshold gives YOLO more AP but more boxes to filter. NMS runs inside our YOLO engines, so we report end-to-end time, not NMS time alone.
 
-```python
-from transformers import RTDetrForObjectDetection
-from src.backbone import PResNet
-from src.encoder import HybridEncoder
-from src.utils.hf_weights import HF_CONFIGS, backbone_state_dict, encoder_state_dict
+### Plots
 
-sd = RTDetrForObjectDetection.from_pretrained("PekingU/rtdetr_r18vd").state_dict()
-backbone = PResNet(**HF_CONFIGS[18]["backbone"]).eval()
-backbone.load_state_dict(backbone_state_dict(sd), strict=True)
-encoder = HybridEncoder(**HF_CONFIGS[18]["encoder"]).eval()
-encoder.load_state_dict(encoder_state_dict(sd), strict=True)
+| | |
+|---|---|
+| ![Paper vs our AP](docs/figures/accuracy.png) | ![AP vs latency](docs/figures/speed_vs_ap.png) |
+| ![NMS threshold sweep](docs/figures/nms_sweep.png) | ![AP by object size](docs/figures/ap_by_size.png) |
 
-p3, n4, n5 = encoder(backbone(images))   # images: [B, 3, 640, 640] in [0, 1], no mean/std
+**AP by object size** (bottom right): R50 and YOLOv8-L tie on small objects (34.7 each), and RT-DETR is ahead on medium and large ones. The paper reports RT-DETR slightly behind YOLO on small objects; for this pair we measured a tie.
 
-# query selection + decoder (R18 has 3 decoder layers, R50 has 6)
-from src.decoder.rtdetr_transformer import RTDetrTransformer
-from src.utils.hf_weights import decoder_state_dict
+### Example detections (RT-DETR-R50 vs YOLOv8-L, same score threshold)
 
-decoder = RTDetrTransformer(num_decoder_layers=3).eval()
-decoder.load_state_dict(decoder_state_dict(sd), strict=True)
+**Crowds:** YOLO's NMS deletes overlapping people as duplicates. RT-DETR keeps one box per person. *(Shibuya crossing, score > 0.25: 113 vs 27 boxes.)*
 
-out = decoder([p3, n4, n5])              # out["logits"] [B, 300, 80], out["pred_boxes"] [B, 300, 4] (cxcywh, 0..1)
-```
+![Shibuya crossing](docs/figures/det_shibuya.jpg)
 
-## Setup
+**Overlapping animals:** a dense zebra herd gives 14 vs 8 zebras. In the elephant photo, RT-DETR is more confident on the half-hidden calf (0.91 vs 0.77).
 
-```bash
-git clone https://github.com/<org>/rt-detr-from-scratch.git
-cd rt-detr-from-scratch
-conda env create -f environment.yml
-conda activate rtdetr
-# or: pip install -r requirements.txt
-```
+![Zebras](docs/figures/det_zebras.jpg)
+![Elephants](docs/figures/det_elephants.jpg)
 
-## Data
+## What we built
 
-We use COCO 2017 (val2017 is enough for evaluation). Expected layout:
+| Part | Code | Checked against the authors' model (max abs diff) |
+|---|---|---|
+| Backbone: ResNet-vd R18 / R50 | `src/backbone/` | exact (0.0) |
+| Hybrid encoder: AIFI (attention on S5 only) + CCFF | `src/encoder/` | ≤ 1.1e-5 |
+| Uncertainty-minimal query selection (top-300) | `src/decoder/rtdetr_transformer.py` | identical selection |
+| Deformable-attention decoder (3 / 6 layers) | `src/decoder/` | ≤ 1e-4 |
+| Contrastive denoising | `src/decoder/denoising.py` | bit-identical (same seed) |
+| Hungarian matcher | `src/matcher/` | identical matches |
+| Losses: VFL + L1 + GIoU | `src/losses/` | ≤ 1e-5 |
+| **Whole model, image → boxes** | `src/model.py` | **3.7e-6 (R18), 2.1e-5 (R50)** |
+| ONNX → TensorRT export (RT-DETR, and YOLOv8 + EfficientNMS) | `scripts/export_trt.py`, `src/utils/trt.py` | FP16 engine within 0.1 AP |
 
-```
-data/coco/
-├── annotations/
-│   └── instances_val2017.json
-└── val2017/
-```
+The authors' pretrained weights (`PekingU/rtdetr_r18vd`, `rtdetr_r50vd`) load into our modules by renaming keys (`src/utils/hf_weights.py`). We didn't re-train; the matcher, losses and denoising are implemented for training and match the reference losses. The parity checks above come from the 137 unit and parity tests we ran during development; they're kept in the git history (`git show f6b3ad9:tests/`).
 
-Download `val2017.zip` and `annotations_trainval2017.zip` from https://cocodataset.org/#download and unzip them into `data/coco/`. Don't commit data or weights.
-
-## Evaluation
+## Quick start
 
 ```bash
-python scripts/eval.py --depth 18 --coco data/coco --mode full   # our whole model, no HF module runs
+git clone https://github.com/Sulojan2027/rt-detr-from-scratch.git && cd rt-detr-from-scratch
+conda env create -f environment.yml && conda activate rtdetr     # or: pip install -r requirements.txt
 ```
 
-`--mode hf` evaluates HF's model; `--mode ours` runs our backbone + encoder with HF's decoder (`encoder_outputs=`); `--mode full` runs our backbone, encoder, query selection and decoder (HF only supplies the weights).
+**Data:** download COCO `val2017.zip` and `annotations_trainval2017.zip` from [cocodataset.org](https://cocodataset.org/#download) and unzip them into `data/coco/` (`annotations/instances_val2017.json`, `val2017/`).
 
-## Repo Structure
+| Task | Command |
+|---|---|
+| COCO AP of our model | `python scripts/eval.py --depth 50 --coco data/coco --mode full` |
+| Build a TensorRT engine (+ its AP) | `python scripts/export_trt.py --model rtdetr_r50 --check-ap` |
+| All benchmarks (dry run, then full) | `LIMIT=50 bash scripts/run_all.sh` → `bash scripts/run_all.sh` |
+| Plots from the results | `python scripts/plot_results.py` |
+| Side-by-side images | `python scripts/visualize.py --images path/to/photo.jpg` |
+
+You need an NVIDIA GPU with TensorRT 10.x for the engines. Our setup: Python 3.11, PyTorch 2.6 (CUDA 12.4), TensorRT 10.16.
+
+## Repo structure
 
 ```
 src/
-├── backbone/     # PResNet (ResNet-vd) — done
-├── encoder/      # position embedding, AIFI, CCFM, HybridEncoder — done
-├── decoder/      # query selection, deformable attention, decoder, denoising — done
-├── matcher/      # Hungarian matcher — done
-├── losses/       # VFL + L1 + GIoU (final, auxiliary, denoising) — done
-├── data/         # COCO dataset + transforms — skeleton (shared)
-├── eval/         # COCO mAP — skeleton (shared)
-├── utils/        # hf_weights (HF key mapping) — done; box_ops — skeleton (shared)
-└── postprocess.py  # logits/boxes → detections — skeleton (shared)
-scripts/eval.py   # COCO evaluation CLI — skeleton
-notebooks/        # 03_hf_parity.ipynb: HF parity proof
-docs/             # implementation notes, HF key dumps
-tests/            # pytest (fast) + -m slow (HF parity, downloads weights)
+├── backbone/      ResNet-vd (PResNet)
+├── encoder/       AIFI, CCFF, HybridEncoder
+├── decoder/       query selection, deformable attention, decoder, denoising
+├── matcher/       Hungarian matcher
+├── losses/        VFL + L1 + GIoU
+├── data/ eval/    COCO dataset, transforms, COCO AP
+├── utils/         HF weight mapping, box ops, TensorRT runner
+├── model.py       RTDETR (whole model) + RTDETRDeploy (ONNX / TensorRT)
+└── postprocess.py logits/boxes → detections
+scripts/           eval, export_trt, benchmark, run_all, plot_results, visualize
+docs/              presentation slides (PDF, PPTX) and README figures
 ```
 
-## Development workflow
+## Team
 
-- `main`: stable, always mergeable
-- `encoder`: backbone + hybrid encoder work (Person A); merges into `main`
-- No CI yet (added at the end). Run `pytest tests/ -m "not slow"` and `ruff check src/ tests/` locally; `-m slow` runs the HF parity tests (downloads weights)
-- PRs require: shape checks with dummy input, a note on which paper section it implements, and (where feasible) a unit test or HF parity check
+| Member | Focus |
+|---|---|
+| Sulojan | Backbone, hybrid encoder (AIFI + CCFF), TensorRT export and benchmarks |
+| Praveen | Query selection, decoder, matcher, losses |
+| Both | Post-processing, data pipeline, COCO evaluation |
 
-## References
+## References and credits
 
-- Paper: [arXiv:2304.08069](https://arxiv.org/abs/2304.08069)
-- Official code: https://github.com/lyuwenyu/RT-DETR
-- Deformable DETR (prior work, useful background): https://arxiv.org/abs/2010.04159
+- Paper: [arXiv:2304.08069](https://arxiv.org/abs/2304.08069) · official code: [lyuwenyu/RT-DETR](https://github.com/lyuwenyu/RT-DETR) · [Hugging Face RT-DETR](https://github.com/huggingface/transformers/tree/main/src/transformers/models/rt_detr)
+- YOLOv8: [ultralytics](https://github.com/ultralytics/ultralytics) · background: [Deformable DETR](https://arxiv.org/abs/2010.04159)
+- Example media (Wikimedia Commons): elephants by Giles Laurent (CC BY-SA 4.0), zebras by Eric Kilby (CC BY-SA 2.0), Shibuya crossing video by Basile Morin (CC BY-SA 4.0).
 
 ## License
 
-Apache 2.0 — see [`LICENSE`](LICENSE). Chosen for compatibility with the official RT-DETR repo's license.
+Apache 2.0, the same as the official RT-DETR repo. See [`LICENSE`](LICENSE).
