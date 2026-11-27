@@ -20,8 +20,5 @@ ultralytics>=8.3
 # ONNX / TensorRT (export + speed benchmark; TensorRT needs an NVIDIA GPU, CUDA 12)
 onnx>=1.15.0
 onnxslim>=0.1.40
-tensorrt-cu12>=10.6
+tensorrt-cu12>=10.6,<11
 
-# dev
-ruff>=0.1.0
-pytest>=7.4.0

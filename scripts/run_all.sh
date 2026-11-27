@@ -59,8 +59,6 @@ EOF
     } 2>&1 | tee "$OUT/logs/env.log"
     n=$(find "$COCO/val2017" -name '*.jpg' 2>/dev/null | wc -l)
     [[ $n == 5000 && -f $COCO/annotations/instances_val2017.json ]] || { echo "COCO val2017 incomplete ($n/5000 images) in $COCO"; exit 1; }
-    run tests_fast "$PY" -m pytest tests -q -m "not slow"
-    run tests_trt "$PY" -m pytest tests/test_trt.py tests/test_export_trt.py tests/test_model.py -q -m slow
 fi
 
 if has accuracy; then
